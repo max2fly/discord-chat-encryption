@@ -13,6 +13,7 @@ import { EncryptionAccessory, handleDecryption, getDecryptedMessages } from "./E
 import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
 import { settings } from "./settings";
 import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage } from "./utils";
+import { cleanupLegacyCache } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
 const UploadStore = findByPropsLazy("getUploads", "upload");
@@ -309,6 +310,9 @@ export default definePlugin({
     },
 
     start() {
+        // Clean up old cached data without dimensions
+        cleanupLegacyCache();
+        
         // Auto-decrypt messages when the plugin starts
         this.autoDecryptVisibleMessages();
         
@@ -334,10 +338,25 @@ export default definePlugin({
 
         if (allPhrases.length === 0) return;
 
-        // Process messages in the background
+        // Process messages in the background, with delay to let Discord load messages first
         setTimeout(async () => {
-            const { decryptAllQueuedMessages } = await import("./EncryptionAccessory");
+            const { decryptAllQueuedMessages, restoreAllCachedAttachments } = await import("./EncryptionAccessory");
+            
+            // Process any new encrypted messages first
             decryptAllQueuedMessages();
+            
+            // Then restore cached attachments after Discord has loaded messages
+            setTimeout(() => {
+                restoreAllCachedAttachments();
+                
+                // Set up periodic restoration in case of race conditions
+                const intervalId = setInterval(() => {
+                    restoreAllCachedAttachments();
+                }, 2000);
+                
+                // Stop after 10 seconds to avoid infinite checking
+                setTimeout(() => clearInterval(intervalId), 10000);
+            }, 2000);
         }, 1000);
     },
 
