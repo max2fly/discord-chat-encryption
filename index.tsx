@@ -45,11 +45,11 @@ async function createEncryptedFile(originalFile: File): Promise<File> {
     // Create a text file with the encrypted content (explicitly UTF-8)
     const encryptedBlob = new Blob([result.text], { type: 'text/plain; charset=utf-8' });
     
-    // Remove extension from filename to make it look like a generic file
+    // Remove extension from filename and add .txt to make it a valid text file
     const baseName = originalFile.name.replace(/\.[^/.]+$/, "");
     
-    return new File([encryptedBlob], baseName, {
-        type: 'text/plain'
+    return new File([encryptedBlob], `${baseName}.txt`, {
+        type: 'text/plain; charset=utf-8'
     });
 }
 
