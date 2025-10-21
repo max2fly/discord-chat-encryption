@@ -1,5 +1,6 @@
 import { Message } from "@vencord/discord-types";
 import { useEffect, useState } from "@webpack/common";
+import { FluxDispatcher } from "@webpack/common";
 
 import { EncryptionIcon } from "./EncryptionIcon";
 import { settings } from "./settings";
@@ -9,6 +10,10 @@ const DecryptedMessages = new Map<string, EncryptionResult>();
 const MessageInstances = new Map<string, Message>();
 const UpdateTriggers = new Map<string, () => void>();
 const EncryptedMessageQueue = new Map<string, string>(); // messageId -> encrypted content
+
+export function getDecryptedMessages() {
+    return DecryptedMessages;
+}
 
 export function handleDecryption(messageId: string, data: EncryptionResult) {
     DecryptedMessages.set(messageId, data);
@@ -73,22 +78,11 @@ export async function decryptAllQueuedMessages() {
 }
 
 export function EncryptionAccessory({ message }: { message: Message; }) {
-    const [isDecrypted, setIsDecrypted] = useState(() => {
-        // Check if already decrypted on initial render
-        return DecryptedMessages.has(message.id);
-    });
     const [decryptedContent, setDecryptedContent] = useState<string | null>(null);
-    const [, forceUpdate] = useState({});
+    const [isEncrypted, setIsEncrypted] = useState(false);
 
     useEffect(() => {
         if ((message as any).vencordEmbeddedBy) return;
-
-        // Register message instance and update trigger
-        MessageInstances.set(message.id, message);
-        UpdateTriggers.set(message.id, () => {
-            setIsDecrypted(true);
-            forceUpdate({});
-        });
 
         const messageContent = message.content || "";
         let contentToDecrypt = messageContent;
@@ -105,73 +99,54 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             isEncryptedMsg = isEncryptedMessage(messageContent);
         }
 
-        // Check if already processed, but re-process if content changed back to encrypted
+        setIsEncrypted(isEncryptedMsg);
+
+        // Check if already decrypted
         const existingDecryption = DecryptedMessages.get(message.id);
-        if (existingDecryption && existingDecryption.success) {
-            // If we have a decryption but the current content is encrypted again (server update), re-decrypt
-            if (isEncryptedMsg) {
-                // Don't return, continue with decryption
-            } else {
-                setIsDecrypted(true);
-                return;
-            }
+        if (existingDecryption?.success) {
+            setDecryptedContent(existingDecryption.text);
+            return;
         }
 
         if (isEncryptedMsg) {
-            // Add to queue for potential future decryption
-            EncryptedMessageQueue.set(message.id, contentToDecrypt);
-
             const allPhrases = [
                 settings.store.secretPhrase,
                 ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
             ].filter(Boolean);
 
             if (allPhrases.length > 0) {
-                // Process decryption immediately without waiting for user interaction
-                setTimeout(() => {
-                    decryptWithMultiplePhrases(contentToDecrypt, allPhrases)
-                        .then(result => {
-                            if (result.success) {
-                                // Override the message content immediately
-                                (message as any).content = result.text;
-                                DecryptedMessages.set(message.id, result);
-                                EncryptedMessageQueue.delete(message.id); // Remove from queue once decrypted
-                                setIsDecrypted(true);
-
-                                // Force a re-render of the message
-                                setTimeout(() => forceUpdate({}), 10);
-                            }
-                        })
-                        .catch(error => {
-                            console.error("Auto-decryption failed for message:", message.id, error);
-                        });
-                }, 0); // Process in next tick to ensure DOM is ready
+                // Process decryption immediately
+                decryptWithMultiplePhrases(contentToDecrypt, allPhrases)
+                    .then(result => {
+                        if (result.success) {
+                            DecryptedMessages.set(message.id, result);
+                            // Modify the message content directly
+                            (message as any).content = result.text;
+                            setDecryptedContent(result.text);
+                            
+                            // Force Discord to re-render this message using Flux
+                            FluxDispatcher.dispatch({
+                                type: "MESSAGE_UPDATE",
+                                message: message
+                            });
+                        }
+                    })
+                    .catch(error => {
+                        console.error("Auto-decryption failed for message:", message.id, error);
+                    });
             }
         }
+    }, [message.id, message.content]);
 
-        // Cleanup function
-        return () => {
-            MessageInstances.delete(message.id);
-            UpdateTriggers.delete(message.id);
-            EncryptedMessageQueue.delete(message.id);
-        };
-
-    }, [message.id, message.content]); // Also depend on content changes
-
-    // If we have decrypted content, temporarily override the message content
-    const originalContent = message.content;
+    // Show lock icon if we have a decrypted message (check the global map)
     const decryptedResult = DecryptedMessages.get(message.id);
-
-    if (decryptedResult?.success && originalContent !== decryptedResult.text) {
-        // Override the message content for display
-        (message as any).content = decryptedResult.text;
+    if (decryptedResult?.success) {
+        return (
+            <div className={cl("profile-lock-indicator")}>
+                <EncryptionIcon width={12} height={12} className={cl("profile-lock-icon")} />
+            </div>
+        );
     }
 
-    if (!isDecrypted) return null;
-
-    return (
-        <div className={cl("profile-lock-indicator")}>
-            <EncryptionIcon width={12} height={12} className={cl("profile-lock-icon")} />
-        </div>
-    );
+    return null;
 }

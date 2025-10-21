@@ -88,3 +88,21 @@
     color: var(--green-360);
     display: block;
 }
+
+.vc-encryption-decrypted-message-replacement {
+    margin-top: -0.25rem; /* Slight negative margin to align better */
+}
+
+.vc-encryption-decrypted-content {
+    font-size: 1rem;
+    line-height: 1.375rem;
+    color: var(--text-normal);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    user-select: text;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+}

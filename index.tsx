@@ -8,7 +8,7 @@ import { Message } from "@vencord/discord-types";
 import { ChannelStore, Menu } from "@webpack/common";
 
 import { DecryptionModal } from "./DecryptionModal";
-import { EncryptionAccessory, handleDecryption } from "./EncryptionAccessory";
+import { EncryptionAccessory, handleDecryption, getDecryptedMessages } from "./EncryptionAccessory";
 import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
 import { settings } from "./settings";
 import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage } from "./utils";
@@ -85,6 +85,8 @@ export default definePlugin({
         }
     ],
     settings,
+
+
     contextMenus: {
         "message": messageCtxPatch
     },
