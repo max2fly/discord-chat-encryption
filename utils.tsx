@@ -327,6 +327,8 @@ export interface ImageEncryptionData {
     filename: string;
     mimeType: string;
     imageData: string; // base64
+    width?: number;
+    height?: number;
 }
 
 export function isEncryptedImageMessage(message: string): boolean {
@@ -343,11 +345,16 @@ export async function encryptImageToMessage(file: File, secretPhrase: string): P
         const arrayBuffer = await file.arrayBuffer();
         const base64Data = arrayBufferToBase64(arrayBuffer);
         
+        // Extract image dimensions
+        const dimensions = await getImageDimensions(file);
+        
         // Create image data object
         const imageData: ImageEncryptionData = {
             filename: file.name,
             mimeType: file.type,
-            imageData: base64Data
+            imageData: base64Data,
+            width: dimensions.width,
+            height: dimensions.height
         };
         
         // Encrypt the image data as JSON
@@ -367,6 +374,29 @@ export async function encryptImageToMessage(file: File, secretPhrase: string): P
         console.error("Image encryption failed:", error);
         return { text: "", success: false, error: "Image encryption failed" };
     }
+}
+
+// Helper function to get image dimensions from a file
+async function getImageDimensions(file: File): Promise<{width: number; height: number}> {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            resolve({
+                width: img.naturalWidth,
+                height: img.naturalHeight
+            });
+        };
+        
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error("Failed to load image for dimension extraction"));
+        };
+        
+        img.src = url;
+    });
 }
 
 export async function decryptImageMessage(encryptedMessage: string, secretPhrase: string): Promise<{

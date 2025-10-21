@@ -22,6 +22,10 @@ export function getDecryptedMessages() {
     return DecryptedMessages;
 }
 
+export function getDecryptedImages() {
+    return DecryptedImages;
+}
+
 export function handleDecryption(messageId: string, data: EncryptionResult) {
     DecryptedMessages.set(messageId, data);
 
@@ -215,6 +219,29 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
                         // Store the decrypted image data
                         DecryptedImages.set(attachmentKey, result.imageData);
                         
+                        // Replace the attachment in the message object directly
+                        const attachmentIndex = message.attachments.findIndex(att => att.id === attachment.id);
+                        if (attachmentIndex !== -1) {
+                            // Create data URL for the decrypted image (Discord can't modify these)
+                            const dataUrl = `data:${result.imageData.mimeType};base64,${result.imageData.imageData}`;
+                            
+                            // Create synthetic image attachment
+                            const syntheticAttachment = {
+                                ...attachment,
+                                filename: result.imageData.filename,
+                                content_type: result.imageData.mimeType,
+                                url: dataUrl,
+                                proxy_url: dataUrl,
+                                width: result.imageData.width || 400, // Use saved dimensions or fallback
+                                height: result.imageData.height || 300, // Use saved dimensions or fallback
+                                size: Math.ceil(result.imageData.imageData.length * 0.75) // Approximate size from base64
+                            };
+                            
+                            // Replace the attachment in the message
+                            message.attachments[attachmentIndex] = syntheticAttachment;
+                            console.log("ChatEncryption: Replaced attachment in message:", syntheticAttachment);
+                        }
+                        
                         // Force re-render of the message
                         FluxDispatcher.dispatch({
                             type: "MESSAGE_UPDATE",
@@ -361,14 +388,17 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
     const decryptedResult = DecryptedMessages.get(message.id);
     const decryptedImage = DecryptedImages.get(message.id);
     
-    // Check for decrypted attachments
+    // Check for decrypted attachments (only show if attachment replacement isn't working)
     const decryptedAttachments: ImageEncryptionData[] = [];
     if (message.attachments && message.attachments.length > 0) {
         for (const attachment of message.attachments) {
-            const attachmentKey = `${message.id}-${attachment.id}`;
-            const decryptedAttachment = DecryptedImages.get(attachmentKey);
-            if (decryptedAttachment) {
-                decryptedAttachments.push(decryptedAttachment);
+            // Only show in accessory if the attachment is still a .txt file (replacement failed)
+            if (attachment.filename?.endsWith('.txt') && attachment.content_type?.startsWith('text/plain')) {
+                const attachmentKey = `${message.id}-${attachment.id}`;
+                const decryptedAttachment = DecryptedImages.get(attachmentKey);
+                if (decryptedAttachment) {
+                    decryptedAttachments.push(decryptedAttachment);
+                }
             }
         }
     }

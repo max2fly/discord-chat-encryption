@@ -113,6 +113,7 @@ function getMessageContent(message: Message) {
         || message.embeds?.find(embed => embed.type === "auto_moderation_message")?.rawDescription || "";
 }
 
+
 let tooltipTimeout: any;
 
 export default definePlugin({
