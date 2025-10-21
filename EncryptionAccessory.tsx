@@ -1,27 +1,9 @@
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
 import { Message } from "@vencord/discord-types";
 import { useEffect, useState } from "@webpack/common";
 
 import { EncryptionIcon } from "./EncryptionIcon";
 import { settings } from "./settings";
-import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage } from "./utils";
+import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage } from "./utils";
 
 const DecryptedMessages = new Map<string, EncryptionResult>();
 const MessageInstances = new Map<string, Message>();
@@ -30,20 +12,20 @@ const EncryptedMessageQueue = new Map<string, string>(); // messageId -> encrypt
 
 export function handleDecryption(messageId: string, data: EncryptionResult) {
     DecryptedMessages.set(messageId, data);
-    
+
     if (data.success) {
         // Update the message content directly
         const messageInstance = MessageInstances.get(messageId);
         if (messageInstance) {
             (messageInstance as any).content = data.text;
         }
-        
+
         // Trigger re-render
         const updateTrigger = UpdateTriggers.get(messageId);
         if (updateTrigger) {
             updateTrigger();
         }
-        
+
         // Force a global re-render as fallback
         setTimeout(() => {
             const trigger = UpdateTriggers.get(messageId);
@@ -67,7 +49,18 @@ export async function decryptAllQueuedMessages() {
     for (const [messageId, encryptedContent] of EncryptedMessageQueue.entries()) {
         if (!DecryptedMessages.has(messageId)) {
             try {
-                const result = await decryptWithMultiplePhrases(encryptedContent, allPhrases);
+                let contentToDecrypt = encryptedContent;
+
+                // Check if this is a hidden message in the original message
+                const messageInstance = MessageInstances.get(messageId);
+                if (messageInstance && isHiddenMessage(messageInstance.content)) {
+                    const extractedEncrypted = extractHiddenMessage(messageInstance.content);
+                    if (extractedEncrypted) {
+                        contentToDecrypt = extractedEncrypted;
+                    }
+                }
+
+                const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
                 if (result.success) {
                     handleDecryption(messageId, result);
                     EncryptedMessageQueue.delete(messageId); // Remove from queue once decrypted
@@ -98,23 +91,36 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         });
 
         const messageContent = message.content || "";
+        let contentToDecrypt = messageContent;
+        let isEncryptedMsg = false;
+
+        // Check if this is a hidden message first
+        if (isHiddenMessage(messageContent)) {
+            const extractedEncrypted = extractHiddenMessage(messageContent);
+            if (extractedEncrypted) {
+                contentToDecrypt = extractedEncrypted;
+                isEncryptedMsg = isEncryptedMessage(contentToDecrypt);
+            }
+        } else {
+            isEncryptedMsg = isEncryptedMessage(messageContent);
+        }
 
         // Check if already processed, but re-process if content changed back to encrypted
         const existingDecryption = DecryptedMessages.get(message.id);
         if (existingDecryption && existingDecryption.success) {
             // If we have a decryption but the current content is encrypted again (server update), re-decrypt
-            if (isEncryptedMessage(messageContent)) {
+            if (isEncryptedMsg) {
                 // Don't return, continue with decryption
             } else {
                 setIsDecrypted(true);
                 return;
             }
         }
-        
-        if (isEncryptedMessage(messageContent)) {
+
+        if (isEncryptedMsg) {
             // Add to queue for potential future decryption
-            EncryptedMessageQueue.set(message.id, messageContent);
-            
+            EncryptedMessageQueue.set(message.id, contentToDecrypt);
+
             const allPhrases = [
                 settings.store.secretPhrase,
                 ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
@@ -123,7 +129,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             if (allPhrases.length > 0) {
                 // Process decryption immediately without waiting for user interaction
                 setTimeout(() => {
-                    decryptWithMultiplePhrases(messageContent, allPhrases)
+                    decryptWithMultiplePhrases(contentToDecrypt, allPhrases)
                         .then(result => {
                             if (result.success) {
                                 // Override the message content immediately
@@ -131,7 +137,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                                 DecryptedMessages.set(message.id, result);
                                 EncryptedMessageQueue.delete(message.id); // Remove from queue once decrypted
                                 setIsDecrypted(true);
-                                
+
                                 // Force a re-render of the message
                                 setTimeout(() => forceUpdate({}), 10);
                             }
@@ -155,7 +161,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
     // If we have decrypted content, temporarily override the message content
     const originalContent = message.content;
     const decryptedResult = DecryptedMessages.get(message.id);
-    
+
     if (decryptedResult?.success && originalContent !== decryptedResult.text) {
         // Override the message content for display
         (message as any).content = decryptedResult.text;

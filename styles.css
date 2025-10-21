@@ -1,0 +1,90 @@
+.vc-encryption-icon {
+    color: var(--interactive-normal);
+    transition: color 0.2s ease;
+}
+
+.vc-encryption-icon:hover {
+    color: var(--interactive-hover);
+}
+
+.vc-encryption-auto-encrypt.vc-encryption-chat-button {
+    color: var(--green-360);
+}
+
+.vc-encryption-auto-encrypt.vc-encryption-chat-button:hover {
+    color: var(--green-330);
+}
+
+.vc-encryption-accessory {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 8px 12px;
+    background: var(--background-secondary-alt);
+    border-radius: 8px;
+    border-left: 3px solid var(--brand-500);
+    font-size: 14px;
+    line-height: 1.375;
+}
+
+.vc-encryption-accessory-icon {
+    color: var(--brand-500);
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
+.vc-encryption-dismiss {
+    background: none;
+    border: none;
+    color: var(--text-link);
+    cursor: pointer;
+    text-decoration: underline;
+    font-size: inherit;
+    padding: 0;
+    margin: 0;
+}
+
+.vc-encryption-dismiss:hover {
+    color: var(--text-link-low-saturation);
+}
+
+.vc-encryption-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+    border-bottom: 1px solid var(--background-modifier-accent);
+}
+
+.vc-encryption-modal-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--header-primary);
+}
+
+.vc-encryption-modal-content {
+    padding: 16px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.vc-encryption-profile-lock-indicator {
+    position: absolute;
+    bottom: -2px;
+    right: -2px;
+    background: var(--background-primary);
+    border: 1px solid var(--green-360);
+    border-radius: 50%;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+}
+
+.vc-encryption-profile-lock-icon {
+    color: var(--green-360);
+    display: block;
+}

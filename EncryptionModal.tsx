@@ -1,21 +1,3 @@
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
 import { Divider } from "@components/Divider";
 import { FormSwitch } from "@components/FormSwitch";
 import { Margins } from "@utils/margins";
@@ -42,7 +24,7 @@ function SecretPhraseInput() {
             <Forms.FormText className={Margins.bottom8}>
                 This phrase will be used to encrypt and decrypt your messages. Keep it secure and share it only with trusted contacts.
             </Forms.FormText>
-            
+
             <div style={{ display: "flex", gap: "8px", alignItems: "flex-end" }}>
                 <div style={{ flex: 1 }}>
                     <TextInput
@@ -85,6 +67,20 @@ function AutoEncryptToggle() {
     );
 }
 
+function HiddenMessageToggle() {
+    const value = settings.use(["useHiddenMessages"]).useHiddenMessages;
+
+    return (
+        <FormSwitch
+            title="Use Hidden Messages"
+            description="Hide encrypted messages within innocent-looking text using steganography"
+            value={value}
+            onChange={v => settings.store.useHiddenMessages = v}
+            hideBorder
+        />
+    );
+}
+
 function BackupSecretPhrasesInput() {
     const [localPhrases, setLocalPhrases] = useState(settings.store.backupSecretPhrases);
     const [showPhrases, setShowPhrases] = useState(false);
@@ -102,7 +98,7 @@ function BackupSecretPhrasesInput() {
             <Forms.FormText className={Margins.bottom8}>
                 Additional secret phrases for decryption (comma-separated). Used when different groups have different passwords.
             </Forms.FormText>
-            
+
             <div style={{ display: "flex", gap: "8px", alignItems: "flex-end" }}>
                 <div style={{ flex: 1 }}>
                     <TextInput
@@ -144,20 +140,24 @@ export function EncryptionModal({ rootProps }: { rootProps: ModalProps; }) {
 
             <ModalContent className={cl("modal-content")}>
                 <SecretPhraseInput />
-                
+
                 <Divider className={Margins.bottom16} />
-                
+
                 <BackupSecretPhrasesInput />
-                
+
                 <Divider className={Margins.bottom16} />
-                
+
                 <AutoEncryptToggle />
-                
+
                 <Divider className={Margins.bottom16} />
-                
+
+                <HiddenMessageToggle />
+
+                <Divider className={Margins.bottom16} />
+
                 <Forms.FormText style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-                    <strong>Security Notice:</strong> Messages are encrypted using AES-256-GCM with PBKDF2 key derivation. 
-                    Your secret phrase is stored locally and never transmitted. Only share your secret phrase with trusted contacts 
+                    <strong>Security Notice:</strong> Messages are encrypted using AES-256-GCM with PBKDF2 key derivation.
+                    Your secret phrase is stored locally and never transmitted. Only share your secret phrase with trusted contacts
                     who need to decrypt your messages.
                 </Forms.FormText>
             </ModalContent>

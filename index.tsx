@@ -1,21 +1,3 @@
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
 import "./styles.css";
 
 import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/ContextMenu";
@@ -29,7 +11,7 @@ import { DecryptionModal } from "./DecryptionModal";
 import { EncryptionAccessory, handleDecryption } from "./EncryptionAccessory";
 import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
 import { settings } from "./settings";
-import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage } from "./utils";
+import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage } from "./utils";
 
 const messageCtxPatch: NavContextMenuPatchCallback = (children, { message }: { message: Message; }) => {
     const content = getMessageContent(message);
@@ -44,15 +26,25 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, { message }: { m
             label="Decrypt Message"
             icon={EncryptionIcon}
             action={async () => {
-                if (isEncryptedMessage(content)) {
+                let contentToDecrypt = content;
+
+                // Check if this is a hidden message first
+                if (isHiddenMessage(content)) {
+                    const extractedEncrypted = extractHiddenMessage(content);
+                    if (extractedEncrypted) {
+                        contentToDecrypt = extractedEncrypted;
+                    }
+                }
+
+                if (isEncryptedMessage(contentToDecrypt)) {
                     // Try auto-decryption first
                     const allPhrases = [
                         settings.store.secretPhrase,
                         ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
                     ].filter(Boolean);
-                    
+
                     if (allPhrases.length > 0) {
-                        const result = await decryptWithMultiplePhrases(content, allPhrases);
+                        const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
                         if (result.success) {
                             handleDecryption(message.id, result);
                             return;
@@ -64,7 +56,7 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, { message }: { m
                 openModal(props => (
                     <DecryptionModal
                         rootProps={props}
-                        encryptedContent={content}
+                        encryptedContent={contentToDecrypt}
                         onSuccess={(decryptedText, usedPhrase) => {
                             handleDecryption(message.id, { text: decryptedText, success: true });
                         }}
@@ -136,15 +128,25 @@ export default definePlugin({
             message,
             channel: ChannelStore.getChannel(message.channel_id),
             onClick: async () => {
-                if (isEncryptedMessage(content)) {
+                let contentToDecrypt = content;
+
+                // Check if this is a hidden message first
+                if (isHiddenMessage(content)) {
+                    const extractedEncrypted = extractHiddenMessage(content);
+                    if (extractedEncrypted) {
+                        contentToDecrypt = extractedEncrypted;
+                    }
+                }
+
+                if (isEncryptedMessage(contentToDecrypt)) {
                     // Try auto-decryption first
                     const allPhrases = [
                         settings.store.secretPhrase,
                         ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
                     ].filter(Boolean);
-                    
+
                     if (allPhrases.length > 0) {
-                        const result = await decryptWithMultiplePhrases(content, allPhrases);
+                        const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
                         if (result.success) {
                             handleDecryption(message.id, result);
                             return;
@@ -156,7 +158,7 @@ export default definePlugin({
                 openModal(props => (
                     <DecryptionModal
                         rootProps={props}
-                        encryptedContent={content}
+                        encryptedContent={contentToDecrypt}
                         onSuccess={(decryptedText, usedPhrase) => {
                             handleDecryption(message.id, { text: decryptedText, success: true });
                         }}
@@ -180,7 +182,19 @@ export default definePlugin({
 
         const result = await encrypt(message.content, settings.store.secretPhrase);
         if (result.success) {
-            message.content = result.text;
+            if (settings.store.useHiddenMessages) {
+                // Use steganographic hiding mode
+                try {
+                    const hiddenMessage = await createHiddenMessage(result.text);
+                    message.content = hiddenMessage;
+                } catch (error) {
+                    console.error("Failed to create hidden message, falling back to normal encryption:", error);
+                    message.content = result.text;
+                }
+            } else {
+                // Use normal encryption display
+                message.content = result.text;
+            }
         } else {
             console.error("Failed to encrypt message:", result.error);
         }

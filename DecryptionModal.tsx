@@ -1,21 +1,3 @@
-/*
- * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
 import { ModalCloseButton, ModalContent, ModalHeader, ModalProps, ModalRoot } from "@utils/modal";
 import { Button, Forms, TextInput, useState } from "@webpack/common";
 
@@ -45,29 +27,29 @@ export function DecryptionModal({ rootProps, encryptedContent, onSuccess }: Decr
 
         try {
             const result = await decrypt(encryptedContent, phrase.trim());
-            
+
             if (result.success) {
                 // Auto-add to backup phrases if not already present
                 const currentBackupPhrases = settings.store.backupSecretPhrases
                     .split(',')
                     .map(p => p.trim())
                     .filter(Boolean);
-                
+
                 const trimmedPhrase = phrase.trim();
-                if (!currentBackupPhrases.includes(trimmedPhrase) && 
+                if (!currentBackupPhrases.includes(trimmedPhrase) &&
                     settings.store.secretPhrase !== trimmedPhrase) {
-                    
+
                     const newBackupPhrases = [...currentBackupPhrases, trimmedPhrase].join(', ');
                     settings.store.backupSecretPhrases = newBackupPhrases;
                 }
 
                 onSuccess(result.text, trimmedPhrase);
-                
+
                 // Trigger batch decryption for all queued messages with new phrase
                 setTimeout(() => {
                     decryptAllQueuedMessages();
                 }, 100);
-                
+
                 rootProps.onClose();
             } else {
                 setError(result.error || "Decryption failed");
@@ -117,7 +99,7 @@ export function DecryptionModal({ rootProps, encryptedContent, onSuccess }: Decr
                 )}
 
                 <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-                    <Button 
+                    <Button
                         color={Button.Colors.PRIMARY}
                         size={Button.Sizes.SMALL}
                         onClick={rootProps.onClose}
@@ -125,7 +107,7 @@ export function DecryptionModal({ rootProps, encryptedContent, onSuccess }: Decr
                     >
                         Cancel
                     </Button>
-                    <Button 
+                    <Button
                         color={Button.Colors.BRAND}
                         size={Button.Sizes.SMALL}
                         onClick={handleDecrypt}
