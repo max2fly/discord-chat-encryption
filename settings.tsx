@@ -37,5 +37,11 @@ export const settings = definePluginSettings({
         description: "Hide encrypted messages in innocent-looking text",
         default: false,
         hidden: true
+    },
+    autoEncryptImages: {
+        type: OptionType.BOOLEAN,
+        description: "Automatically encrypt image attachments",
+        default: false,
+        hidden: true
     }
 });

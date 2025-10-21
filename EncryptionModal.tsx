@@ -81,6 +81,20 @@ function HiddenMessageToggle() {
     );
 }
 
+function AutoEncryptImagesToggle() {
+    const value = settings.use(["autoEncryptImages"]).autoEncryptImages;
+
+    return (
+        <FormSwitch
+            title="Auto Encrypt Images"
+            description="Automatically convert image attachments to encrypted text messages"
+            value={value}
+            onChange={v => settings.store.autoEncryptImages = v}
+            hideBorder
+        />
+    );
+}
+
 function BackupSecretPhrasesInput() {
     const [localPhrases, setLocalPhrases] = useState(settings.store.backupSecretPhrases);
     const [showPhrases, setShowPhrases] = useState(false);
@@ -152,6 +166,10 @@ export function EncryptionModal({ rootProps }: { rootProps: ModalProps; }) {
                 <Divider className={Margins.bottom16} />
 
                 <HiddenMessageToggle />
+
+                <Divider className={Margins.bottom16} />
+
+                <AutoEncryptImagesToggle />
 
                 <Divider className={Margins.bottom16} />
 

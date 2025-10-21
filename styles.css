@@ -106,3 +106,112 @@
     align-items: baseline;
     gap: 4px;
 }
+
+/* Encrypted image message styles */
+.vc-encryption-encryption-accessories {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.vc-encryption-decrypted-image-container {
+    background: var(--background-secondary-alt);
+    border-radius: 8px;
+    padding: 12px;
+    border-left: 3px solid var(--green-360);
+    max-width: 500px;
+    margin-top: 8px;
+}
+
+.vc-encryption-decrypted-image {
+    display: block;
+    border-radius: 6px;
+    max-width: 100%;
+    height: auto;
+    margin-bottom: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.vc-encryption-image-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.vc-encryption-image-lock-icon {
+    color: var(--green-360);
+    flex-shrink: 0;
+}
+
+/* Encrypted image attachment styles */
+.vc-encryption-message-accessories {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.vc-encryption-encrypted-attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.vc-encryption-decrypted-image {
+    background: var(--background-secondary-alt);
+    border-radius: 8px;
+    padding: 8px;
+    border-left: 3px solid var(--green-360);
+    max-width: 500px;
+}
+
+.vc-encryption-decrypted-image-content {
+    display: block;
+    border-radius: 4px;
+    max-width: 100%;
+    height: auto;
+    margin-bottom: 6px;
+}
+
+.vc-encryption-image-info {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.vc-encryption-image-lock-icon {
+    color: var(--green-360);
+    flex-shrink: 0;
+}
+
+/* Processing states */
+.vc-encryption-processing-icon {
+    color: var(--yellow-360);
+    animation: vc-encryption-spin 1s linear infinite;
+}
+
+.vc-encryption-decrypted-icon {
+    color: var(--green-360);
+}
+
+.vc-encryption-encrypted-icon {
+    color: var(--red-400);
+}
+
+@keyframes vc-encryption-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Hide encrypted text attachments when decrypted images are shown */
+.vc-encryption-hide-encrypted-attachment {
+    display: none !important;
+}

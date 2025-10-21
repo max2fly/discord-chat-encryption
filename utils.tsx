@@ -50,9 +50,12 @@ async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey>
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
     const bytes = new Uint8Array(buffer);
+    // Use a more robust approach that handles UTF-8 properly
     let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, Array.from(chunk));
     }
     return btoa(binary);
 }
@@ -314,4 +317,91 @@ export function extractHiddenMessage(message: string): string | null {
 export function isHiddenMessage(message: string): boolean {
     return message.includes(HIDDEN_MESSAGE_MARKER) &&
            HIDDEN_CHARS.some(char => message.includes(char));
+}
+
+// Image encryption utilities
+const IMAGE_ENCRYPTION_PREFIX = "[IMG_ENC:v1:";
+const IMAGE_ENCRYPTION_SUFFIX = "]";
+
+export interface ImageEncryptionData {
+    filename: string;
+    mimeType: string;
+    imageData: string; // base64
+}
+
+export function isEncryptedImageMessage(message: string): boolean {
+    return message.includes(IMAGE_ENCRYPTION_PREFIX) && message.includes(IMAGE_ENCRYPTION_SUFFIX);
+}
+
+export async function encryptImageToMessage(file: File, secretPhrase: string): Promise<EncryptionResult> {
+    if (!file || !secretPhrase) {
+        return { text: "", success: false, error: "Missing file or secret phrase" };
+    }
+
+    try {
+        // Convert file to base64
+        const arrayBuffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(arrayBuffer);
+        
+        // Create image data object
+        const imageData: ImageEncryptionData = {
+            filename: file.name,
+            mimeType: file.type,
+            imageData: base64Data
+        };
+        
+        // Encrypt the image data as JSON
+        const jsonData = JSON.stringify(imageData);
+        const encrypted = await encrypt(jsonData, secretPhrase);
+        
+        if (!encrypted.success) {
+            return { text: "", success: false, error: encrypted.error };
+        }
+        
+        // Create image encryption message format
+        const imageMessage = `${IMAGE_ENCRYPTION_PREFIX}${encrypted.text.slice(ENCRYPTION_PREFIX.length, -ENCRYPTION_SUFFIX.length)}${IMAGE_ENCRYPTION_SUFFIX}`;
+        
+        return { text: imageMessage, success: true };
+        
+    } catch (error) {
+        console.error("Image encryption failed:", error);
+        return { text: "", success: false, error: "Image encryption failed" };
+    }
+}
+
+export async function decryptImageMessage(encryptedMessage: string, secretPhrase: string): Promise<{
+    success: boolean;
+    imageData?: ImageEncryptionData;
+    error?: string;
+}> {
+    if (!encryptedMessage || !secretPhrase) {
+        return { success: false, error: "Missing message or secret phrase" };
+    }
+
+    try {
+        // Extract encrypted content
+        if (!isEncryptedImageMessage(encryptedMessage)) {
+            return { success: false, error: "Not an encrypted image message" };
+        }
+        
+        const content = encryptedMessage.slice(IMAGE_ENCRYPTION_PREFIX.length, -IMAGE_ENCRYPTION_SUFFIX.length);
+        
+        // Reconstruct full encryption format for decryption
+        const fullEncrypted = `${ENCRYPTION_PREFIX}${content}${ENCRYPTION_SUFFIX}`;
+        
+        // Decrypt the content
+        const decrypted = await decrypt(fullEncrypted, secretPhrase);
+        if (!decrypted.success) {
+            return { success: false, error: decrypted.error };
+        }
+        
+        // Parse image data
+        const imageData: ImageEncryptionData = JSON.parse(decrypted.text);
+        
+        return { success: true, imageData };
+        
+    } catch (error) {
+        console.error("Image decryption failed:", error);
+        return { success: false, error: "Image decryption failed" };
+    }
 }

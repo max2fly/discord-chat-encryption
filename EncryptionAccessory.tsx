@@ -4,12 +4,13 @@ import { FluxDispatcher } from "@webpack/common";
 
 import { EncryptionIcon } from "./EncryptionIcon";
 import { settings } from "./settings";
-import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage } from "./utils";
+import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage, isEncryptedImageMessage, decryptImageMessage, ImageEncryptionData } from "./utils";
 
 const DecryptedMessages = new Map<string, EncryptionResult>();
 const MessageInstances = new Map<string, Message>();
 const UpdateTriggers = new Map<string, () => void>();
 const EncryptedMessageQueue = new Map<string, string>(); // messageId -> encrypted content
+const DecryptedImages = new Map<string, ImageEncryptionData>(); // messageId -> decrypted image data
 
 export function getDecryptedMessages() {
     return DecryptedMessages;
@@ -87,6 +88,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         const messageContent = message.content || "";
         let contentToDecrypt = messageContent;
         let isEncryptedMsg = false;
+        let isEncryptedImg = false;
 
         // Check if this is a hidden message first
         if (isHiddenMessage(messageContent)) {
@@ -97,9 +99,38 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             }
         } else {
             isEncryptedMsg = isEncryptedMessage(messageContent);
+            isEncryptedImg = isEncryptedImageMessage(messageContent);
         }
 
-        setIsEncrypted(isEncryptedMsg);
+        setIsEncrypted(isEncryptedMsg || isEncryptedImg);
+
+        // Handle encrypted image messages
+        if (isEncryptedImg && !DecryptedImages.has(message.id)) {
+            const allPhrases = [
+                settings.store.secretPhrase,
+                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+            ].filter(Boolean);
+
+            if (allPhrases.length > 0) {
+                // Try to decrypt the image with all available phrases
+                (async () => {
+                    for (const phrase of allPhrases) {
+                        const result = await decryptImageMessage(messageContent, phrase);
+                        if (result.success && result.imageData) {
+                            DecryptedImages.set(message.id, result.imageData);
+                            // Force re-render
+                            FluxDispatcher.dispatch({
+                                type: "MESSAGE_UPDATE",
+                                message: message
+                            });
+                            break;
+                        }
+                    }
+                })().catch(error => {
+                    console.error("Auto-decryption failed for image message:", message.id, error);
+                });
+            }
+        }
 
         // Check if already decrypted
         const existingDecryption = DecryptedMessages.get(message.id);
@@ -138,12 +169,32 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         }
     }, [message.id, message.content]);
 
-    // Show lock icon if we have a decrypted message (check the global map)
+    // Check for decrypted messages and images
     const decryptedResult = DecryptedMessages.get(message.id);
-    if (decryptedResult?.success) {
+    const decryptedImage = DecryptedImages.get(message.id);
+    
+    if (decryptedResult?.success || decryptedImage) {
         return (
-            <div className={cl("profile-lock-indicator")}>
-                <EncryptionIcon width={12} height={12} className={cl("profile-lock-icon")} />
+            <div className={cl("encryption-accessories")}>
+                {decryptedResult?.success && (
+                    <div className={cl("profile-lock-indicator")}>
+                        <EncryptionIcon width={12} height={12} className={cl("profile-lock-icon")} />
+                    </div>
+                )}
+                {decryptedImage && (
+                    <div className={cl("decrypted-image-container")}>
+                        <img 
+                            src={`data:${decryptedImage.mimeType};base64,${decryptedImage.imageData}`}
+                            alt={decryptedImage.filename}
+                            className={cl("decrypted-image")}
+                            style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
+                        />
+                        <div className={cl("image-info")}>
+                            <EncryptionIcon width={12} height={12} className={cl("image-lock-icon")} />
+                            {" "}{decryptedImage.filename}
+                        </div>
+                    </div>
+                )}
             </div>
         );
     }
