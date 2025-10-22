@@ -47,6 +47,54 @@ export function cleanupLegacyCache() {
     }
 }
 
+// Function to mark video elements in DOM for download interception and fix poster
+function markVideoElementForDownload(encryptedVideoKey: string, blobUrl: string) {
+    // Find video elements with matching src
+    const videos = document.querySelectorAll('video') as NodeListOf<HTMLVideoElement>;
+
+    for (const video of videos) {
+        if (video.src === blobUrl && !(video as any).encryptedVideoKey) {
+            (video as any).encryptedVideoKey = encryptedVideoKey;
+            console.log('ChatEncryption: Marked video element for download interception:', encryptedVideoKey);
+
+            // Fix poster attribute to use data URL thumbnail instead of blob URL
+            const decryptedVideos = getDecryptedVideos();
+            const videoData = decryptedVideos.get(encryptedVideoKey);
+            if (videoData) {
+                // Get the attachment to find the thumbnail
+                const messageId = encryptedVideoKey.split('-')[0];
+                const messageInstance = MessageInstances.get(messageId);
+                if (messageInstance && messageInstance.attachments) {
+                    const attachment = messageInstance.attachments.find(att =>
+                        (att as any).encryptedVideoKey === encryptedVideoKey);
+                    if (attachment) {
+                        // Try multiple thumbnail properties
+                        const thumbnailUrl = (attachment as any).thumbnail_url ||
+                                            (attachment as any)._customThumbnail ||
+                                            (attachment as any).poster ||
+                                            (attachment as any).thumbnail;
+
+                        if (thumbnailUrl && thumbnailUrl.startsWith('data:')) {
+                            console.log('ChatEncryption: Setting video poster to:', thumbnailUrl.substring(0, 50));
+                            video.poster = thumbnailUrl;
+
+                            // Also try setting other attributes that might work
+                            (video as any).thumbnail = thumbnailUrl;
+                            video.setAttribute('poster', thumbnailUrl);
+
+                            console.log('ChatEncryption: Fixed video poster to data URL thumbnail');
+                            console.log('ChatEncryption: Video poster after fix:', video.poster?.substring(0, 50));
+                        } else {
+                            console.warn('ChatEncryption: No valid thumbnail URL found in attachment');
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+}
+
 export function handleDecryption(messageId: string, data: EncryptionResult) {
     DecryptedMessages.set(messageId, data);
 
@@ -170,7 +218,7 @@ export async function restoreAllCachedAttachments() {
                     for (let i = 0; i < binaryString.length; i++) {
                         bytes[i] = binaryString.charCodeAt(i);
                     }
-                    
+
                     const blob = new Blob([bytes], { type: cachedDecryption.mimeType });
                     const blobUrl = URL.createObjectURL(blob);
 
@@ -193,7 +241,8 @@ export async function restoreAllCachedAttachments() {
                         size: blob.size,
                         ...(thumbnail && { thumbnail_url: thumbnail, thumbnail_proxy_url: thumbnail }),
                         isEncryptedVideo: true,
-                        originalBlob: blob
+                        originalBlob: blob,
+                        encryptedVideoKey: attachmentKey
                     };
 
                     messageInstance.attachments[attachmentIndex] = syntheticAttachment;
@@ -204,6 +253,11 @@ export async function restoreAllCachedAttachments() {
                         type: "MESSAGE_UPDATE",
                         message: messageInstance
                     });
+
+                    // Mark video element for download interception
+                    setTimeout(() => {
+                        markVideoElementForDownload(attachmentKey, blobUrl);
+                    }, 100);
                 }
             }
         }
@@ -256,50 +310,90 @@ async function generateVideoThumbnail(videoBlob: Blob, mimeType: string): Promis
         const video = document.createElement('video');
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        
+
         if (!ctx) {
             reject(new Error('Cannot get canvas context'));
             return;
         }
-        
+
         video.crossOrigin = 'anonymous';
         video.muted = true;
         video.playsInline = true;
-        
-        video.addEventListener('loadedmetadata', () => {
-            // Set canvas dimensions to video dimensions
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            
-            // Seek to 1 second or 10% of duration, whichever is smaller
-            const seekTime = Math.min(1, video.duration * 0.1);
-            video.currentTime = seekTime;
-        });
-        
-        video.addEventListener('seeked', () => {
+        video.preload = 'metadata';
+
+        let hasGenerated = false;
+
+        const cleanup = () => {
+            if (video.src) {
+                URL.revokeObjectURL(video.src);
+            }
+        };
+
+        const generateThumbnail = () => {
+            if (hasGenerated) return;
+            hasGenerated = true;
+
             try {
+                // Ensure video has valid dimensions
+                if (video.videoWidth === 0 || video.videoHeight === 0) {
+                    throw new Error('Video has no dimensions');
+                }
+
+                // Set canvas dimensions to video dimensions
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
                 // Draw current frame to canvas
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                
+
                 // Convert to data URL
                 const thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-                
-                // Clean up
-                URL.revokeObjectURL(video.src);
-                
+
+                cleanup();
                 resolve(thumbnailDataUrl);
             } catch (error) {
+                cleanup();
                 reject(error);
             }
+        };
+
+        // Set up event handlers
+        video.addEventListener('loadedmetadata', () => {
+            console.log('ChatEncryption: Video metadata loaded, dimensions:', video.videoWidth, 'x', video.videoHeight);
+
+            // Try to generate thumbnail immediately if video is ready
+            if (video.readyState >= 2) { // HAVE_CURRENT_DATA
+                generateThumbnail();
+            } else {
+                // Seek to a good frame for thumbnail (1 second or 10% of duration)
+                const seekTime = Math.min(1, video.duration * 0.1);
+                video.currentTime = seekTime;
+            }
         });
-        
+
+        video.addEventListener('seeked', generateThumbnail);
+        video.addEventListener('loadeddata', generateThumbnail);
+
         video.addEventListener('error', (e) => {
-            URL.revokeObjectURL(video.src);
+            console.warn('ChatEncryption: Video thumbnail generation failed:', e);
+            cleanup();
             reject(new Error(`Video load error: ${e}`));
         });
-        
+
+        // Timeout fallback
+        setTimeout(() => {
+            if (!hasGenerated) {
+                console.warn('ChatEncryption: Video thumbnail generation timeout');
+                cleanup();
+                reject(new Error('Video thumbnail generation timeout'));
+            }
+        }, 10000);
+
         // Set video source
         video.src = URL.createObjectURL(videoBlob);
+
+        // Try to load the video
+        video.load();
     });
 }
 
@@ -499,7 +593,7 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
                     }
                 }
             }
-        } 
+        }
         // Check if this looks like our encrypted video format
         else if (textContent.startsWith('[VID_ENC:v1:')) {
             console.log("ChatEncryption: Found encrypted video attachment");
@@ -544,40 +638,162 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
                             for (let i = 0; i < binaryString.length; i++) {
                                 bytes[i] = binaryString.charCodeAt(i);
                             }
-                            
+
                             const blob = new Blob([bytes], { type: result.videoData.mimeType });
                             const blobUrl = URL.createObjectURL(blob);
-                            
+
                             console.log("ChatEncryption: Created video blob URL, size:", blob.size, "bytes");
-                            
+
                             // Generate video thumbnail for preview
                             let thumbnail = null;
                             try {
+                                console.log('ChatEncryption: Generating thumbnail for video:', result.videoData.filename);
                                 thumbnail = await generateVideoThumbnail(blob, result.videoData.mimeType);
+                                console.log('ChatEncryption: Successfully generated thumbnail');
                             } catch (error) {
                                 console.warn("ChatEncryption: Failed to generate video thumbnail:", error);
                             }
 
-                            // Create synthetic video attachment with blob URL and thumbnail
+                            // Always generate a fallback thumbnail as data URL to avoid Discord CDN issues
+                            if (!thumbnail) {
+                                try {
+                                    const canvas = document.createElement('canvas');
+                                    canvas.width = 320;
+                                    canvas.height = 180;
+                                    const ctx = canvas.getContext('2d');
+                                    if (ctx) {
+                                        // Draw a dark background with video icon
+                                        ctx.fillStyle = '#2f3136';
+                                        ctx.fillRect(0, 0, 320, 180);
+
+                                        // Draw play icon
+                                        ctx.fillStyle = '#ffffff';
+                                        ctx.beginPath();
+                                        ctx.moveTo(120, 60);
+                                        ctx.lineTo(120, 120);
+                                        ctx.lineTo(180, 90);
+                                        ctx.closePath();
+                                        ctx.fill();
+
+                                        thumbnail = canvas.toDataURL('image/jpeg', 0.8);
+                                        console.log('ChatEncryption: Generated fallback thumbnail');
+                                    }
+                                } catch (fallbackError) {
+                                    console.warn('ChatEncryption: Failed to generate fallback thumbnail:', fallbackError);
+                                }
+                            }
+
+                            // Debug: Log the thumbnail to see what we're setting
+                            console.log("ChatEncryption: Generated thumbnail type:", thumbnail ? "data URL" : "none");
+                            console.log("ChatEncryption: Thumbnail starts with data:", thumbnail?.startsWith('data:'));
+
+                            // Debug: Log original attachment to see CDN-related properties
+                            console.log("ChatEncryption: Original attachment keys:", Object.keys(attachment));
+                            console.log("ChatEncryption: Original attachment ID:", attachment.id);
+                            console.log("ChatEncryption: Original proxy_url:", attachment.proxy_url);
+
+                            // INSIGHT: Discord is auto-generating thumbnails for ANY video content_type
                             const syntheticAttachment = {
-                                ...attachment,
                                 filename: result.videoData.filename,
                                 content_type: result.videoData.mimeType,
+                                size: blob.size,
                                 url: blobUrl,
-                                proxy_url: blobUrl,
+                                proxy_url: blobUrl, // Main video blob URL
                                 width: result.videoData.width || 640,
                                 height: result.videoData.height || 480,
-                                size: blob.size,
-                                // Add thumbnail if generated successfully
-                                ...(thumbnail && { thumbnail_url: thumbnail, thumbnail_proxy_url: thumbnail }),
-                                // Mark as encrypted video for custom download handling
+                                // Thumbnail properties - Discord expects these for video thumbnails
+                                thumbnail: thumbnail ? {
+                                    url: thumbnail,
+                                    proxy_url: thumbnail, // Use data URL directly as proxy
+                                    width: 320,
+                                    height: 180
+                                } : null,
+                                // Additional thumbnail properties Discord might check
+                                thumbnail_url: thumbnail,
+                                thumbnail_proxy_url: thumbnail,
+                                thumbnail_width: 320,
+                                thumbnail_height: 180,
+                                // Prevent CDN processing by removing Discord-specific properties
+                                spoiler: false,
+                                deleted: false,
+                                // Mark as encrypted video for our custom handling
                                 isEncryptedVideo: true,
-                                originalBlob: blob
+                                originalBlob: blob,
+                                encryptedVideoKey: attachmentKey
                             };
+
+                            // Remove any properties that might contain blob URLs
+                            const propsToClean = ['thumbnail_url', 'thumbnail_proxy_url', 'poster', 'preview', 'thumbnail'];
+                            propsToClean.forEach(prop => {
+                                if (syntheticAttachment[prop] && syntheticAttachment[prop].startsWith('blob:')) {
+                                    console.warn(`ChatEncryption: Found blob URL in ${prop}, replacing with data URL`);
+                                    syntheticAttachment[prop] = thumbnail || null;
+                                }
+                            });
+
+                            // Debug: log the final attachment structure
+                            console.log("ChatEncryption: Final attachment thumbnail_url:", syntheticAttachment.thumbnail_url?.substring(0, 50));
+                            console.log("ChatEncryption: Full attachment object:", {
+                                filename: syntheticAttachment.filename,
+                                content_type: syntheticAttachment.content_type,
+                                url: syntheticAttachment.url?.substring(0, 50),
+                                thumbnail_url: syntheticAttachment.thumbnail_url?.substring(0, 50),
+                                thumbnail_width: syntheticAttachment.thumbnail_width,
+                                thumbnail_height: syntheticAttachment.thumbnail_height,
+                                width: syntheticAttachment.width,
+                                height: syntheticAttachment.height,
+                                size: syntheticAttachment.size
+                            });
 
                             // Replace the attachment in the message
                             message.attachments[attachmentIndex] = syntheticAttachment;
                             console.log("ChatEncryption: Replaced video attachment in message with blob URL");
+                            console.log("ChatEncryption: ✅ IMPORTANT: No CDN network error - check if thumbnail is now visible!");
+
+                            // Set up observer to mark video elements when they appear in DOM
+                            setTimeout(() => {
+                                markVideoElementForDownload(attachmentKey, blobUrl);
+
+                                // Additional debugging - check if video element exists and what its poster is
+                                setTimeout(() => {
+                                    const videos = document.querySelectorAll('video');
+                                    for (const video of videos) {
+                                        if (video.src === blobUrl) {
+                                            console.log('ChatEncryption: Found video element after marking');
+                                            console.log('ChatEncryption: Video poster:', video.poster?.substring(0, 50));
+                                            console.log('ChatEncryption: Video encrypted key:', (video as any).encryptedVideoKey);
+                                            console.log('ChatEncryption: Video attributes:', {
+                                                src: video.src?.substring(0, 50),
+                                                poster: video.poster?.substring(0, 50),
+                                                width: video.width,
+                                                height: video.height,
+                                                videoWidth: video.videoWidth,
+                                                videoHeight: video.videoHeight
+                                            });
+
+                                            // Set up a detailed observer for this specific video
+                                            const detailObserver = new MutationObserver((mutations) => {
+                                                mutations.forEach((mutation) => {
+                                                    if (mutation.attributeName === 'poster') {
+                                                        console.log('ChatEncryption: POSTER CHANGED!');
+                                                        console.log('ChatEncryption: Old poster:', mutation.oldValue?.substring(0, 50));
+                                                        console.log('ChatEncryption: New poster:', video.poster?.substring(0, 50));
+                                                        console.log('ChatEncryption: Change time:', new Date().toISOString());
+                                                    }
+                                                });
+                                            });
+
+                                            detailObserver.observe(video, {
+                                                attributes: true,
+                                                attributeOldValue: true,
+                                                attributeFilter: ['poster', 'src']
+                                            });
+
+                                            break;
+                                        }
+                                    }
+                                }, 500);
+                            }, 100);
                         }
 
                         // Force re-render of the message
@@ -657,7 +873,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                         }
                     }, 100);
                 }
-                
+
                 // Also check for cached videos that need restoration
                 const cachedVideoDecryption = DecryptedVideos.get(attachmentKey);
                 if (cachedVideoDecryption && !attachment.url?.startsWith('blob:')) {
@@ -673,7 +889,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                                 for (let i = 0; i < binaryString.length; i++) {
                                     bytes[i] = binaryString.charCodeAt(i);
                                 }
-                                
+
                                 const blob = new Blob([bytes], { type: cachedVideoDecryption.mimeType });
                                 const blobUrl = URL.createObjectURL(blob);
 
@@ -692,7 +908,8 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                                             thumbnail_url: thumbnail,
                                             thumbnail_proxy_url: thumbnail,
                                             isEncryptedVideo: true,
-                                            originalBlob: blob
+                                            originalBlob: blob,
+                                            encryptedVideoKey: attachmentKey
                                         };
 
                                         message.attachments[attachmentIndex] = syntheticAttachment;
@@ -701,10 +918,15 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                                             type: "MESSAGE_UPDATE",
                                             message: message
                                         });
+
+                                        // Mark video element for download interception
+                                        setTimeout(() => {
+                                            markVideoElementForDownload(attachmentKey, blobUrl);
+                                        }, 100);
                                     })
                                     .catch(error => {
                                         console.warn("ChatEncryption: Failed to generate video thumbnail during safety net restore:", error);
-                                        
+
                                         // Fallback without thumbnail
                                         const syntheticAttachment = {
                                             ...currentAttachment,
@@ -716,7 +938,8 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                                             height: cachedVideoDecryption.height || 480,
                                             size: blob.size,
                                             isEncryptedVideo: true,
-                                            originalBlob: blob
+                                            originalBlob: blob,
+                                            encryptedVideoKey: attachmentKey
                                         };
 
                                         message.attachments[attachmentIndex] = syntheticAttachment;
@@ -725,6 +948,11 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                                             type: "MESSAGE_UPDATE",
                                             message: message
                                         });
+
+                                        // Mark video element for download interception
+                                        setTimeout(() => {
+                                            markVideoElementForDownload(attachmentKey, blobUrl);
+                                        }, 100);
                                     });
                             }
                         }

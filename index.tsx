@@ -21,6 +21,10 @@ const FileUtils = findByPropsLazy("makeFile");
 const UploadAttachmentStore = findByPropsLazy("addFiles");
 const CloudUpload = findByPropsLazy("CloudUpload", "upload");
 
+// Find Discord's download/save modules
+const DownloadModule = findByPropsLazy("downloadFile", "saveFile");
+const AttachmentActions = findByPropsLazy("downloadAttachment");
+
 // Helper function to check if file is an image
 function isImageFile(fileItem: any): boolean {
     // Handle both direct File objects and Discord's file wrapper objects
@@ -549,6 +553,9 @@ export default definePlugin({
 
     // Runtime interception setup
     originalAddFiles: null as any,
+    originalDownloadFunction: null as any,
+    posterObserver: null as any,
+    originalFetch: null as any,
     
     setupUploadInterception() {
         console.log("ChatEncryption: Setting up upload interception...");
@@ -724,52 +731,349 @@ export default definePlugin({
     setupDownloadInterception() {
         console.log("ChatEncryption: Setting up download interception for encrypted videos...");
         
-        // Intercept clicks on download buttons for encrypted videos
+        try {
+            // Wait for modules to be available
+            setTimeout(() => {
+                // Debug: log what's available in the modules
+                console.log("ChatEncryption: DownloadModule:", DownloadModule);
+                console.log("ChatEncryption: AttachmentActions:", AttachmentActions);
+                
+                if (DownloadModule) {
+                    console.log("ChatEncryption: DownloadModule keys:", Object.keys(DownloadModule));
+                }
+                if (AttachmentActions) {
+                    console.log("ChatEncryption: AttachmentActions keys:", Object.keys(AttachmentActions));
+                }
+                
+                // Try multiple potential download modules
+                let downloadFunction = null;
+                
+                if (DownloadModule && DownloadModule.downloadFile) {
+                    downloadFunction = DownloadModule.downloadFile;
+                    console.log("ChatEncryption: Found DownloadModule.downloadFile");
+                } else if (DownloadModule && DownloadModule.saveFile) {
+                    downloadFunction = DownloadModule.saveFile;
+                    console.log("ChatEncryption: Found DownloadModule.saveFile");
+                } else if (AttachmentActions && AttachmentActions.downloadAttachment) {
+                    downloadFunction = AttachmentActions.downloadAttachment;
+                    console.log("ChatEncryption: Found AttachmentActions.downloadAttachment");
+                }
+                
+                if (downloadFunction) {
+                    // Store original function
+                    this.originalDownloadFunction = downloadFunction.bind(downloadFunction.constructor);
+                    
+                    // Replace with our interceptor
+                    const originalFunc = downloadFunction;
+                    const interceptor = (url: string, filename?: string, ...args: any[]) => {
+                        console.log("ChatEncryption: Download intercepted:", url, filename);
+                        
+                        // Check if this is an encrypted video blob URL
+                        const decryptedVideos = getDecryptedVideos();
+                        for (const [key, videoData] of decryptedVideos.entries()) {
+                            // Check if the URL matches our blob or if filename matches
+                            if (url.startsWith('blob:') && (filename === videoData.filename || url.includes(key))) {
+                                console.log("ChatEncryption: Intercepting download for encrypted video:", videoData.filename);
+                                this.downloadEncryptedVideo(videoData);
+                                return; // Prevent original download
+                            }
+                        }
+                        
+                        // Call original function for non-encrypted files
+                        return originalFunc(url, filename, ...args);
+                    };
+                    
+                    // Replace the function
+                    if (DownloadModule && DownloadModule.downloadFile === originalFunc) {
+                        DownloadModule.downloadFile = interceptor;
+                    } else if (DownloadModule && DownloadModule.saveFile === originalFunc) {
+                        DownloadModule.saveFile = interceptor;
+                    } else if (AttachmentActions && AttachmentActions.downloadAttachment === originalFunc) {
+                        AttachmentActions.downloadAttachment = interceptor;
+                    }
+                    
+                    console.log("ChatEncryption: Download interception setup complete");
+                } else {
+                    console.warn("ChatEncryption: Download functions not found, falling back to DOM interception");
+                    this.setupDOMDownloadInterception();
+                }
+            }, 100);
+            
+            // Also set up DOM interception regardless for testing
+            setTimeout(() => {
+                console.log("ChatEncryption: Setting up additional DOM interception for testing");
+                this.setupDOMDownloadInterception();
+            }, 200);
+        } catch (error) {
+            console.error("ChatEncryption: Failed to setup download interception:", error);
+            // Fallback to DOM-based interception
+            this.setupDOMDownloadInterception();
+        }
+    },
+    
+    setupDOMDownloadInterception() {
+        console.log("ChatEncryption: Setting up DOM-based download interception");
+        
+        // Fallback DOM-based interception with comprehensive selectors
         document.addEventListener('click', (event) => {
             const target = event.target as HTMLElement;
             
-            // Check if this is a download button or link
-            if (target.closest('[data-role="button"]') || target.closest('a[download]') || target.closest('[aria-label*="download"]')) {
-                // Look for video elements in the DOM to find encrypted videos
-                const videoContainer = target.closest('[class*="attachment"], [class*="media"]');
+            // More comprehensive download button detection
+            const isDownloadAction = target.closest('a[download]') || 
+                                   target.closest('[aria-label*="download"]') ||
+                                   target.closest('[aria-label*="Download"]') ||
+                                   target.closest('[aria-label*="Save"]') ||
+                                   target.closest('[aria-label*="save"]') ||
+                                   target.closest('button[class*="download"]') ||
+                                   target.closest('[role="menuitem"]') && 
+                                   target.textContent?.toLowerCase().includes('download');
+            
+            if (isDownloadAction) {
+                console.log("ChatEncryption: Download action detected, checking for encrypted video");
+                
+                // Look for video containers in various ways
+                const videoContainer = target.closest('[class*="attachment"]') || 
+                                     target.closest('[class*="media"]') ||
+                                     target.closest('[class*="embed"]') ||
+                                     // Look in the broader message area
+                                     target.closest('[id^="message-"]') ||
+                                     target.closest('[class*="message"]');
+                
                 if (videoContainer) {
-                    const video = videoContainer.querySelector('video');
-                    if (video && video.src && video.src.startsWith('blob:')) {
-                        // This might be an encrypted video, check if we can find it in our cache
-                        const decryptedVideos = getDecryptedVideos();
+                    const video = videoContainer.querySelector('video') as HTMLVideoElement;
+                    console.log("ChatEncryption: Found video element:", video);
+                    console.log("ChatEncryption: Video encrypted key:", (video as any)?.encryptedVideoKey);
+                    
+                    if (video && (video as any).encryptedVideoKey) {
+                        console.log("ChatEncryption: DOM intercepting download for encrypted video");
+                        event.preventDefault();
+                        event.stopPropagation();
                         
-                        for (const [key, videoData] of decryptedVideos.entries()) {
-                            // Create the expected blob URL to match against
-                            try {
-                                const binaryString = atob(videoData.videoData);
-                                const bytes = new Uint8Array(binaryString.length);
-                                for (let i = 0; i < binaryString.length; i++) {
-                                    bytes[i] = binaryString.charCodeAt(i);
+                        const videoKey = (video as any).encryptedVideoKey;
+                        const decryptedVideos = getDecryptedVideos();
+                        const videoData = decryptedVideos.get(videoKey);
+                        
+                        if (videoData) {
+                            console.log("ChatEncryption: Found video data, triggering download:", videoData.filename);
+                            this.downloadEncryptedVideo(videoData);
+                        } else {
+                            console.warn("ChatEncryption: Could not find video data for download, key:", videoKey);
+                            console.warn("ChatEncryption: Available video keys:", Array.from(decryptedVideos.keys()));
+                        }
+                    } else {
+                        console.log("ChatEncryption: Video element not marked as encrypted or no video found");
+                    }
+                } else {
+                    console.log("ChatEncryption: No video container found for download action");
+                }
+            }
+        }, true);
+    },
+    
+    setupPosterFixObserver() {
+        console.log("ChatEncryption: Setting up poster fix observer");
+        
+        // Observer to fix video poster URLs that get set to blob URLs
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                if (mutation.type === 'attributes' && mutation.attributeName === 'poster') {
+                    const video = mutation.target as HTMLVideoElement;
+                    if (video.poster && video.poster.startsWith('blob:') && (video as any).encryptedVideoKey) {
+                        console.log("ChatEncryption: Detected blob poster URL, fixing...");
+                        this.fixVideoPoster(video);
+                    }
+                }
+                
+                if (mutation.type === 'childList') {
+                    mutation.addedNodes.forEach((node) => {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            const element = node as Element;
+                            
+                            // Check if it's a video with a blob poster
+                            if (element.tagName === 'VIDEO') {
+                                const video = element as HTMLVideoElement;
+                                if (video.poster && video.poster.startsWith('blob:') && (video as any).encryptedVideoKey) {
+                                    console.log("ChatEncryption: New video with blob poster detected, fixing...");
+                                    setTimeout(() => this.fixVideoPoster(video), 100);
                                 }
-                                const blob = new Blob([bytes], { type: videoData.mimeType });
-                                const blobUrl = URL.createObjectURL(blob);
-                                
-                                // Check if this matches the video source (approximate check)
-                                if (video.src === blobUrl || videoContainer.textContent?.includes(videoData.filename)) {
-                                    console.log("ChatEncryption: Intercepting download for encrypted video:", videoData.filename);
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    
-                                    // Trigger custom download
-                                    this.downloadEncryptedVideo(videoData);
-                                    URL.revokeObjectURL(blobUrl);
-                                    return;
+                            }
+                            
+                            // Check for videos in child elements
+                            const videos = element.querySelectorAll ? element.querySelectorAll('video') : [];
+                            videos.forEach((video: HTMLVideoElement) => {
+                                if (video.poster && video.poster.startsWith('blob:') && (video as any).encryptedVideoKey) {
+                                    console.log("ChatEncryption: Child video with blob poster detected, fixing...");
+                                    setTimeout(() => this.fixVideoPoster(video), 100);
                                 }
-                                URL.revokeObjectURL(blobUrl);
-                            } catch (error) {
-                                // Skip invalid entries
-                                continue;
+                            });
+                        }
+                    });
+                }
+            });
+        });
+        
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['poster']
+        });
+        
+        this.posterObserver = observer;
+    },
+    
+    fixVideoPoster(video: HTMLVideoElement) {
+        const encryptedKey = (video as any).encryptedVideoKey;
+        if (!encryptedKey) return;
+        
+        console.log("ChatEncryption: Fixing poster for video with key:", encryptedKey);
+        
+        const decryptedVideos = getDecryptedVideos();
+        const messageId = encryptedKey.split('-')[0];
+        const messageInstances = require('./EncryptionAccessory').MessageInstances;
+        const messageInstance = messageInstances.get(messageId);
+        
+        if (messageInstance && messageInstance.attachments) {
+            const attachment = messageInstance.attachments.find(att => 
+                (att as any).encryptedVideoKey === encryptedKey);
+            if (attachment) {
+                const thumbnailUrl = (attachment as any).thumbnail_url || 
+                                   (attachment as any)._customThumbnail ||
+                                   (attachment as any).poster ||
+                                   (attachment as any).thumbnail;
+                
+                if (thumbnailUrl && thumbnailUrl.startsWith('data:')) {
+                    // Set poster aggressively with multiple methods
+                    video.poster = thumbnailUrl;
+                    video.setAttribute('poster', thumbnailUrl);
+                    (video as any).thumbnail = thumbnailUrl;
+                    
+                    // Also try to override any cached poster data Discord might have
+                    Object.defineProperty(video, 'poster', {
+                        value: thumbnailUrl,
+                        writable: false,
+                        configurable: true
+                    });
+                    
+                    console.log('ChatEncryption: Aggressively fixed video poster to data URL');
+                    
+                    // Set up continuous monitoring to prevent Discord from changing it back
+                    const observer = new MutationObserver(() => {
+                        if (video.poster !== thumbnailUrl && video.poster.startsWith('blob:')) {
+                            console.log('ChatEncryption: Discord changed poster back to blob, re-fixing...');
+                            video.poster = thumbnailUrl;
+                            video.setAttribute('poster', thumbnailUrl);
+                        }
+                    });
+                    
+                    observer.observe(video, {
+                        attributes: true,
+                        attributeFilter: ['poster']
+                    });
+                    
+                    // Store observer for cleanup
+                    (video as any)._posterObserver = observer;
+                }
+            }
+        }
+    },
+    
+    setupNetworkInterception() {
+        console.log("ChatEncryption: Setting up comprehensive network request logging");
+        
+        // Store original fetch and XMLHttpRequest
+        const originalFetch = window.fetch;
+        const OriginalXMLHttpRequest = window.XMLHttpRequest;
+        
+        // Log ALL fetch requests to see what's happening
+        window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = input.toString();
+            
+            // Log all blob requests
+            if (url.startsWith('blob:')) {
+                console.log("ChatEncryption: FETCH REQUEST - Blob URL:", url);
+                console.log("ChatEncryption: FETCH REQUEST - Full URL:", url);
+                console.log("ChatEncryption: FETCH REQUEST - Has format param:", url.includes('format='));
+                console.log("ChatEncryption: FETCH REQUEST - Has width param:", url.includes('width='));
+                console.log("ChatEncryption: FETCH REQUEST - Has height param:", url.includes('height='));
+            }
+            
+            // Call original fetch
+            return originalFetch(input, init);
+        };
+        
+        // Log ALL XMLHttpRequest requests
+        window.XMLHttpRequest = function() {
+            const xhr = new OriginalXMLHttpRequest();
+            const originalOpen = xhr.open;
+            
+            xhr.open = function(method: string, url: string | URL, ...args: any[]) {
+                const urlStr = url.toString();
+                
+                // Log all blob requests
+                if (urlStr.startsWith('blob:')) {
+                    console.log("ChatEncryption: XHR REQUEST - Method:", method);
+                    console.log("ChatEncryption: XHR REQUEST - Blob URL:", urlStr);
+                    console.log("ChatEncryption: XHR REQUEST - Full URL:", urlStr);
+                    console.log("ChatEncryption: XHR REQUEST - Has format param:", urlStr.includes('format='));
+                    console.log("ChatEncryption: XHR REQUEST - Has width param:", urlStr.includes('width='));
+                    console.log("ChatEncryption: XHR REQUEST - Has height param:", urlStr.includes('height='));
+                }
+                
+                return originalOpen.call(this, method, url, ...args);
+            };
+            
+            return xhr;
+        };
+        
+        // Also add a global error listener to catch network errors
+        window.addEventListener('error', (event) => {
+            if (event.target && (event.target as any).src && (event.target as any).src.startsWith('blob:')) {
+                console.log("ChatEncryption: NETWORK ERROR - Failed to load blob:", (event.target as any).src);
+                console.log("ChatEncryption: NETWORK ERROR - Element type:", event.target.constructor.name);
+                console.log("ChatEncryption: NETWORK ERROR - Full event:", event);
+            }
+        }, true);
+        
+        this.originalFetch = originalFetch;
+        this.originalXMLHttpRequest = OriginalXMLHttpRequest;
+    },
+    
+    getCustomThumbnailForBlobUrl(url: string): string | null {
+        // Extract the blob ID from the URL
+        const blobId = url.match(/blob:https:\/\/discord\.com\/([^?]+)/)?.[1];
+        
+        if (blobId) {
+            const decryptedVideos = getDecryptedVideos();
+            // Find videos with similar blob URLs
+            const videos = document.querySelectorAll('video');
+            for (const video of videos) {
+                if (video.src.includes(blobId)) {
+                    const encryptedKey = (video as any).encryptedVideoKey;
+                    if (encryptedKey && decryptedVideos.has(encryptedKey)) {
+                        console.log("ChatEncryption: Found matching encrypted video for blob:", blobId);
+                        
+                        // Get the custom thumbnail from attachment
+                        const messageId = encryptedKey.split('-')[0];
+                        const messageInstances = require('./EncryptionAccessory').MessageInstances;
+                        const messageInstance = messageInstances.get(messageId);
+                        
+                        if (messageInstance && messageInstance.attachments) {
+                            const attachment = messageInstance.attachments.find(att => 
+                                (att as any).encryptedVideoKey === encryptedKey);
+                            if (attachment && (attachment as any).thumbnail_url) {
+                                const thumbnailUrl = (attachment as any).thumbnail_url;
+                                if (thumbnailUrl && thumbnailUrl.startsWith('data:')) {
+                                    return thumbnailUrl;
+                                }
                             }
                         }
                     }
                 }
             }
-        }, true); // Use capture phase to intercept early
+        }
+        
+        return null;
     },
 
     downloadEncryptedVideo(videoData) {
@@ -805,6 +1109,8 @@ export default definePlugin({
     },
 
     start() {
+        console.log("ChatEncryption: Plugin starting...");
+        
         // Clean up old cached data without dimensions
         cleanupLegacyCache();
         
@@ -815,7 +1121,16 @@ export default definePlugin({
         this.setupUploadInterception();
         
         // Setup download interception for encrypted videos
+        console.log("ChatEncryption: About to setup download interception...");
         this.setupDownloadInterception();
+        
+        // Setup poster fix observer
+        this.setupPosterFixObserver();
+        
+        // Setup network request interception to block blob thumbnail fetches
+        this.setupNetworkInterception();
+        
+        console.log("ChatEncryption: Plugin startup complete");
     },
 
     stop() {
@@ -824,6 +1139,33 @@ export default definePlugin({
             console.log("ChatEncryption: Restoring original addFiles function");
             UploadAttachmentStore.addFiles = this.originalAddFiles;
             this.originalAddFiles = null;
+        }
+        
+        // Clean up download interception
+        if (this.originalDownloadFunction) {
+            console.log("ChatEncryption: Restoring original download function");
+            if (DownloadModule && DownloadModule.downloadFile) {
+                DownloadModule.downloadFile = this.originalDownloadFunction;
+            } else if (DownloadModule && DownloadModule.saveFile) {
+                DownloadModule.saveFile = this.originalDownloadFunction;
+            } else if (AttachmentActions && AttachmentActions.downloadAttachment) {
+                AttachmentActions.downloadAttachment = this.originalDownloadFunction;
+            }
+            this.originalDownloadFunction = null;
+        }
+        
+        // Clean up poster observer
+        if (this.posterObserver) {
+            console.log("ChatEncryption: Disconnecting poster observer");
+            this.posterObserver.disconnect();
+            this.posterObserver = null;
+        }
+        
+        // Clean up fetch interception
+        if (this.originalFetch) {
+            console.log("ChatEncryption: Restoring original fetch");
+            window.fetch = this.originalFetch;
+            this.originalFetch = null;
         }
     },
 
