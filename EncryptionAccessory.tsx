@@ -194,22 +194,22 @@ async function downloadAttachment(attachment: any, url: string, maxAttempts = 3)
 
     // Check if already downloading
     if (DownloadQueue.has(downloadKey)) {
-        console.log("ChatEncryption: Download already in progress, waiting...");
+        //console.log("ChatEncryption: Download already in progress, waiting...");
         return await DownloadQueue.get(downloadKey)!;
     }
 
     const downloadPromise = async (): Promise<string> => {
-        console.log("ChatEncryption: Downloading attachment:", attachment.filename, "from:", url);
+        //console.log("ChatEncryption: Downloading attachment:", attachment.filename, "from:", url);
 
         // For text files, only use direct CDN URL (proxy URL returns 415 for .txt files)
         const urlsToTry = [attachment.url].filter(Boolean);
 
         for (const currentUrl of urlsToTry) {
-            console.log("ChatEncryption: Trying URL:", currentUrl);
+            //console.log("ChatEncryption: Trying URL:", currentUrl);
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
-                    console.log(`ChatEncryption: Download attempt ${attempt}/${maxAttempts} for ${currentUrl}`);
+                    //console.log(`ChatEncryption: Download attempt ${attempt}/${maxAttempts} for ${currentUrl}`);
 
                     // Add timeout to prevent hanging
                     const controller = new AbortController();
@@ -240,8 +240,8 @@ async function downloadAttachment(attachment: any, url: string, maxAttempts = 3)
                     }
 
                     const content = await response.text();
-                    console.log("ChatEncryption: Successfully downloaded content, length:", content.length);
-                    console.log("ChatEncryption: Content preview:", content.substring(0, 100));
+                    //console.log("ChatEncryption: Successfully downloaded content, length:", content.length);
+                    //console.log("ChatEncryption: Content preview:", content.substring(0, 100));
 
                     // Cache the content for future use
                     AttachmentContentCache.set(cacheKey, content);
@@ -249,11 +249,11 @@ async function downloadAttachment(attachment: any, url: string, maxAttempts = 3)
                     return content;
 
                 } catch (error) {
-                    console.error(`ChatEncryption: Download attempt ${attempt} failed for ${currentUrl}:`, error);
+                    //console.error(`ChatEncryption: Download attempt ${attempt} failed for ${currentUrl}:`, error);
 
                     // If this is a CORS error, don't retry this URL
                     if ((error as Error).message.includes("CORS") || (error as Error).message.includes("cors")) {
-                        console.log("ChatEncryption: CORS error detected, trying next URL if available");
+                        //console.log("ChatEncryption: CORS error detected, trying next URL if available");
                         break; // Break out of retry loop for this URL
                     }
 
@@ -264,7 +264,7 @@ async function downloadAttachment(attachment: any, url: string, maxAttempts = 3)
 
                     // Exponential backoff before retry
                     const delay = 1000 * attempt;
-                    console.log(`ChatEncryption: Waiting ${delay}ms before retry...`);
+                    //console.log(`ChatEncryption: Waiting ${delay}ms before retry...`);
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
             }
@@ -292,7 +292,7 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
     // Check if we have old cached data without proper dimensions, clear it (but only once)
     const existingDecrypted = DecryptedImages.get(attachmentKey);
     if (existingDecrypted && (!existingDecrypted.width || !existingDecrypted.height) && !UpgradeProcessed.has(attachmentKey)) {
-        console.log("ChatEncryption: Found old cached data without dimensions, clearing it");
+        //console.log("ChatEncryption: Found old cached data without dimensions, clearing it");
         DecryptedImages.delete(attachmentKey);
         ProcessedAttachments.delete(attachmentKey);
         UpgradeProcessed.add(attachmentKey); // Mark as upgraded to prevent loops
@@ -306,12 +306,12 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
     ProcessedAttachments.add(attachmentKey);
 
     try {
-        console.log("ChatEncryption: Downloading encrypted attachment:", attachment.url);
+        //console.log("ChatEncryption: Downloading encrypted attachment:", attachment.url);
 
         // For text files, use direct CDN URL only (proxy returns 415 for txt files)
         const urlToFetch = attachment.url;
 
-        console.log("ChatEncryption: Fetching from URL:", urlToFetch);
+        //console.log("ChatEncryption: Fetching from URL:", urlToFetch);
 
         // Download attachment content directly
         const textContent = await downloadAttachment(attachment, urlToFetch);
@@ -320,7 +320,7 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
 
         // Check if this looks like our encrypted image format
         if (textContent.startsWith('[IMG_ENC:v1:')) {
-            console.log("ChatEncryption: Found encrypted image attachment");
+            //console.log("ChatEncryption: Found encrypted image attachment");
 
             const allPhrases = [
                 settings.store.secretPhrase,
@@ -332,11 +332,11 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
                 for (const phrase of allPhrases) {
                     const result = await decryptImageMessage(textContent, phrase);
                     if (result.success && result.imageData) {
-                        console.log("ChatEncryption: Successfully decrypted attachment:", result.imageData.filename);
+                        //console.log("ChatEncryption: Successfully decrypted attachment:", result.imageData.filename);
 
                         // Handle old format without dimensions - add default dimensions but continue processing
                         if (!result.imageData.width || !result.imageData.height) {
-                            console.log("ChatEncryption: Old format detected (no dimensions), using defaults");
+                            //console.log("ChatEncryption: Old format detected (no dimensions), using defaults");
                             result.imageData.width = 400;
                             result.imageData.height = 300;
                         }
@@ -364,7 +364,7 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
 
                             // Replace the attachment in the message
                             message.attachments[attachmentIndex] = syntheticAttachment;
-                            console.log("ChatEncryption: Replaced attachment in message:", syntheticAttachment);
+                            //console.log("ChatEncryption: Replaced attachment in message:", syntheticAttachment);
                         }
 
                         // Force re-render of the message
@@ -377,10 +377,10 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
                 }
             }
         } else {
-            console.log("ChatEncryption: Attachment does not appear to be encrypted image format");
+            //console.log("ChatEncryption: Attachment does not appear to be encrypted image format");
         }
     } catch (error) {
-        console.error("ChatEncryption: Failed to process encrypted attachment:", error);
+        //console.error("ChatEncryption: Failed to process encrypted attachment:", error);
         ProcessedAttachments.delete(attachmentKey); // Allow retry on error
     }
 }
@@ -397,7 +397,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
     if (cachedTextDecryption?.success && (isEncryptedMessage(message.content) || isHiddenMessage(message.content))) {
         // Text is cached but message content is still encrypted - restore it
         setTimeout(() => {
-            console.log("ChatEncryption: Auto-restoring cached text for message:", message.id);
+            //console.log("ChatEncryption: Auto-restoring cached text for message:", message.id);
             message.content = cachedTextDecryption.text;
 
             FluxDispatcher.dispatch({
@@ -464,7 +464,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                 // Our encrypted files are .txt files with text/plain content type
                 if (attachment.filename.endsWith('.txt') &&
                     attachment.content_type?.startsWith('text/plain')) {
-                    console.log("ChatEncryption: Found encrypted attachment (.txt file):", attachment.filename);
+                    //console.log("ChatEncryption: Found encrypted attachment (.txt file):", attachment.filename);
                     hasEncryptedAttachment = true;
                     // Process attachment in background, don't await (non-blocking)
                     handleEncryptedAttachment(message, attachment).catch(error => {
@@ -519,17 +519,15 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         // Check if already decrypted
         const existingDecryption = DecryptedMessages.get(message.id);
         if (existingDecryption?.success) {
-            console.log("ChatEncryption: Found existing text decryption for message:", message.id);
+            //console.log("ChatEncryption: Found existing text decryption for message:", message.id);
             setDecryptedContent(existingDecryption.text);
             // Also update the message content directly for cache persistence
             (message as any).content = existingDecryption.text;
             return;
-        } else {
-            console.log("ChatEncryption: No existing text decryption found for message:", message.id);
         }
 
         if (isEncryptedMsg) {
-            console.log("ChatEncryption: Processing encrypted text message:", message.id, "Content to decrypt:", contentToDecrypt.substring(0, 50));
+            //console.log("ChatEncryption: Processing encrypted text message:", message.id, "Content to decrypt:", contentToDecrypt.substring(0, 50));
 
             const allPhrases = [
                 settings.store.secretPhrase,
@@ -537,13 +535,13 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             ].filter(Boolean);
 
             if (allPhrases.length > 0) {
-                console.log("ChatEncryption: Starting text decryption with", allPhrases.length, "phrases");
+                //console.log("ChatEncryption: Starting text decryption with", allPhrases.length, "phrases");
                 // Process decryption immediately and independently of any image processing
                 decryptWithMultiplePhrases(contentToDecrypt, allPhrases)
                     .then(result => {
-                        console.log("ChatEncryption: Text decryption result:", result.success ? "SUCCESS" : "FAILED", message.id);
+                        //console.log("ChatEncryption: Text decryption result:", result.success ? "SUCCESS" : "FAILED", message.id);
                         if (result.success) {
-                            console.log("ChatEncryption: Setting decrypted text for message:", message.id);
+                            //console.log("ChatEncryption: Setting decrypted text for message:", message.id);
                             DecryptedMessages.set(message.id, result);
                             // Modify the message content directly
                             (message as any).content = result.text;
@@ -564,8 +562,6 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             } else {
                 console.log("ChatEncryption: No phrases available for text decryption");
             }
-        } else {
-            console.log("ChatEncryption: Message is not encrypted text:", message.id);
         }
     }, [message.id, message.content]);
 
