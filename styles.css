@@ -211,6 +211,39 @@
     to { transform: rotate(360deg); }
 }
 
+/* Video styles */
+.vc-encryption-decrypted-video-container {
+    background: var(--background-secondary-alt);
+    border-radius: 8px;
+    padding: 12px;
+    border-left: 3px solid var(--green-360);
+    max-width: 500px;
+    margin-top: 8px;
+}
+
+.vc-encryption-decrypted-video {
+    display: block;
+    border-radius: 6px;
+    max-width: 100%;
+    height: auto;
+    margin-bottom: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.vc-encryption-video-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.vc-encryption-video-lock-icon {
+    color: var(--green-360);
+    flex-shrink: 0;
+}
+
 /* Hide encrypted text attachments when decrypted images are shown */
 .vc-encryption-hide-encrypted-attachment {
     display: none !important;

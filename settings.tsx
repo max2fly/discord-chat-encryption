@@ -24,7 +24,7 @@ export const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "Show alert when auto-encrypt is enabled",
         default: true,
-        hidden: true
+        hidden: false
     },
     showAutoEncryptTooltip: {
         type: OptionType.BOOLEAN,
@@ -41,6 +41,12 @@ export const settings = definePluginSettings({
     autoEncryptImages: {
         type: OptionType.BOOLEAN,
         description: "Automatically encrypt image attachments",
+        default: false,
+        hidden: true
+    },
+    autoEncryptVideos: {
+        type: OptionType.BOOLEAN,
+        description: "Automatically encrypt video attachments",
         default: false,
         hidden: true
     }

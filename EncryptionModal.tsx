@@ -95,6 +95,20 @@ function AutoEncryptImagesToggle() {
     );
 }
 
+function AutoEncryptVideosToggle() {
+    const value = settings.use(["autoEncryptVideos"]).autoEncryptVideos;
+
+    return (
+        <FormSwitch
+            title="Auto Encrypt Videos"
+            description="Automatically convert video attachments to encrypted text messages"
+            value={value}
+            onChange={v => settings.store.autoEncryptVideos = v}
+            hideBorder
+        />
+    );
+}
+
 function BackupSecretPhrasesInput() {
     const [localPhrases, setLocalPhrases] = useState(settings.store.backupSecretPhrases);
     const [showPhrases, setShowPhrases] = useState(false);
@@ -170,6 +184,10 @@ export function EncryptionModal({ rootProps }: { rootProps: ModalProps; }) {
                 <Divider className={Margins.bottom16} />
 
                 <AutoEncryptImagesToggle />
+
+                <Divider className={Margins.bottom16} />
+
+                <AutoEncryptVideosToggle />
 
                 <Divider className={Margins.bottom16} />
 

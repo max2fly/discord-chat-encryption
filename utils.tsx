@@ -435,3 +435,124 @@ export async function decryptImageMessage(encryptedMessage: string, secretPhrase
         return { success: false, error: "Image decryption failed" };
     }
 }
+
+// Video encryption utilities
+const VIDEO_ENCRYPTION_PREFIX = "[VID_ENC:v1:";
+const VIDEO_ENCRYPTION_SUFFIX = "]";
+
+export interface VideoEncryptionData {
+    filename: string;
+    mimeType: string;
+    videoData: string; // base64
+    duration?: number;
+    width?: number;
+    height?: number;
+}
+
+export function isEncryptedVideoMessage(message: string): boolean {
+    return message.includes(VIDEO_ENCRYPTION_PREFIX) && message.includes(VIDEO_ENCRYPTION_SUFFIX);
+}
+
+export async function encryptVideoToMessage(file: File, secretPhrase: string): Promise<EncryptionResult> {
+    if (!file || !secretPhrase) {
+        return { text: "", success: false, error: "Missing file or secret phrase" };
+    }
+
+    try {
+        // Convert file to base64
+        const arrayBuffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(arrayBuffer);
+        
+        // Extract video metadata
+        const metadata = await getVideoMetadata(file);
+        
+        // Create video data object
+        const videoData: VideoEncryptionData = {
+            filename: file.name,
+            mimeType: file.type,
+            videoData: base64Data,
+            duration: metadata.duration,
+            width: metadata.width,
+            height: metadata.height
+        };
+        
+        // Encrypt the video data as JSON
+        const jsonData = JSON.stringify(videoData);
+        const encrypted = await encrypt(jsonData, secretPhrase);
+        
+        if (!encrypted.success) {
+            return { text: "", success: false, error: encrypted.error };
+        }
+        
+        // Create video encryption message format
+        const videoMessage = `${VIDEO_ENCRYPTION_PREFIX}${encrypted.text.slice(ENCRYPTION_PREFIX.length, -ENCRYPTION_SUFFIX.length)}${VIDEO_ENCRYPTION_SUFFIX}`;
+        
+        return { text: videoMessage, success: true };
+        
+    } catch (error) {
+        console.error("Video encryption failed:", error);
+        return { text: "", success: false, error: "Video encryption failed" };
+    }
+}
+
+// Helper function to get video metadata from a file
+async function getVideoMetadata(file: File): Promise<{duration?: number; width?: number; height?: number}> {
+    return new Promise((resolve) => {
+        const video = document.createElement('video');
+        const url = URL.createObjectURL(file);
+        
+        video.onloadedmetadata = () => {
+            URL.revokeObjectURL(url);
+            resolve({
+                duration: video.duration,
+                width: video.videoWidth || undefined,
+                height: video.videoHeight || undefined
+            });
+        };
+        
+        video.onerror = () => {
+            URL.revokeObjectURL(url);
+            // Return empty metadata on error, don't fail the entire encryption
+            resolve({});
+        };
+        
+        video.src = url;
+    });
+}
+
+export async function decryptVideoMessage(encryptedMessage: string, secretPhrase: string): Promise<{
+    success: boolean;
+    videoData?: VideoEncryptionData;
+    error?: string;
+}> {
+    if (!encryptedMessage || !secretPhrase) {
+        return { success: false, error: "Missing message or secret phrase" };
+    }
+
+    try {
+        // Extract encrypted content
+        if (!isEncryptedVideoMessage(encryptedMessage)) {
+            return { success: false, error: "Not an encrypted video message" };
+        }
+        
+        const content = encryptedMessage.slice(VIDEO_ENCRYPTION_PREFIX.length, -VIDEO_ENCRYPTION_SUFFIX.length);
+        
+        // Reconstruct full encryption format for decryption
+        const fullEncrypted = `${ENCRYPTION_PREFIX}${content}${ENCRYPTION_SUFFIX}`;
+        
+        // Decrypt the content
+        const decrypted = await decrypt(fullEncrypted, secretPhrase);
+        if (!decrypted.success) {
+            return { success: false, error: decrypted.error };
+        }
+        
+        // Parse video data
+        const videoData: VideoEncryptionData = JSON.parse(decrypted.text);
+        
+        return { success: true, videoData };
+        
+    } catch (error) {
+        console.error("Video decryption failed:", error);
+        return { success: false, error: "Video decryption failed" };
+    }
+}

@@ -9,10 +9,10 @@ import { ChannelStore, Menu } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
 import { DecryptionModal } from "./DecryptionModal";
-import { EncryptionAccessory, handleDecryption, getDecryptedMessages, getDecryptedImages } from "./EncryptionAccessory";
+import { EncryptionAccessory, handleDecryption, getDecryptedMessages, getDecryptedImages, getDecryptedVideos } from "./EncryptionAccessory";
 import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
 import { settings } from "./settings";
-import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage } from "./utils";
+import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage, encryptVideoToMessage } from "./utils";
 import { cleanupLegacyCache } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
@@ -35,9 +35,32 @@ function isImageFile(fileItem: any): boolean {
     return actualFile.type.startsWith('image/');
 }
 
+// Helper function to check if file is a video
+function isVideoFile(fileItem: any): boolean {
+    // Handle both direct File objects and Discord's file wrapper objects
+    const actualFile = fileItem?.file || fileItem;
+    
+    if (!actualFile || !actualFile.type) {
+        console.log("ChatEncryption: No file.type found for:", fileItem);
+        return false;
+    }
+    
+    console.log("ChatEncryption: Checking file type:", actualFile.type);
+    return actualFile.type.startsWith('video/');
+}
+
 // Helper function to create encrypted file replacement
 async function createEncryptedFile(originalFile: File): Promise<File> {
-    const result = await encryptImageToMessage(originalFile, settings.store.secretPhrase);
+    let result;
+    
+    // Choose encryption method based on file type
+    if (originalFile.type.startsWith('image/')) {
+        result = await encryptImageToMessage(originalFile, settings.store.secretPhrase);
+    } else if (originalFile.type.startsWith('video/')) {
+        result = await encryptVideoToMessage(originalFile, settings.store.secretPhrase);
+    } else {
+        throw new Error("Unsupported file type for encryption");
+    }
     
     if (!result.success) {
         throw new Error(result.error || "Encryption failed");
@@ -120,8 +143,8 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, props) => {
         console.log("ChatEncryption: Image in message context menu detected");
         const src = props.itemHref ?? props.itemSrc;
         
-        if (src && isDecryptedImage(src)) {
-            console.log("ChatEncryption: Adding copy/save options for decrypted image in message context");
+        if (src && isDecryptedMedia(src)) {
+            console.log("ChatEncryption: Adding copy/save options for decrypted media in message context");
             // Try to find the group with copy-native-link (where Copy Link and Open Link are)
             const group = findGroupChildrenByChildId("copy-native-link", children) || 
                          findGroupChildrenByChildId("copy-link", children) ||
@@ -130,18 +153,22 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, props) => {
             console.log("ChatEncryption: Found group for copy/open link:", group);
             
             if (group) {
+                const isImage = isDecryptedImage(src);
+                const isVideo = isDecryptedVideo(src);
+                const mediaType = isImage ? "Image" : "Video";
+                
                 group.push(
                     <Menu.MenuItem
-                        id="vc-copy-decrypted-image-msg"
-                        label="Copy Image"
+                        id={`vc-copy-decrypted-${mediaType.toLowerCase()}-msg`}
+                        label={`Copy ${mediaType}`}
                         icon={EncryptionIcon}
-                        action={() => copyDecryptedImage(src)}
+                        action={() => isImage ? copyDecryptedImage(src) : copyDecryptedVideo(src)}
                     />,
                     <Menu.MenuItem
-                        id="vc-save-decrypted-image-msg"
-                        label="Save Image"
+                        id={`vc-save-decrypted-${mediaType.toLowerCase()}-msg`}
+                        label={`Save ${mediaType}`}
                         icon={EncryptionIcon}
-                        action={() => saveDecryptedImage(src)}
+                        action={() => isImage ? saveDecryptedImage(src) : saveDecryptedVideo(src)}
                     />
                 );
                 console.log("ChatEncryption: Added copy/save options to message context menu");
@@ -163,32 +190,36 @@ const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => 
         return;
     }
     
-    // Check if this is a decrypted image (data URL from our cache)
-    const isDecrypted = isDecryptedImage(props.src);
-    console.log("ChatEncryption: Is decrypted image:", isDecrypted);
-    console.log("ChatEncryption: Image URL starts with:", props.src.substring(0, 50));
+    // Check if this is decrypted media (image or video data URL from our cache)
+    const isDecrypted = isDecryptedMedia(props.src);
+    console.log("ChatEncryption: Is decrypted media:", isDecrypted);
+    console.log("ChatEncryption: Media URL starts with:", props.src.substring(0, 50));
     
     if (isDecrypted) {
-        console.log("ChatEncryption: Adding context menu items for decrypted image");
+        console.log("ChatEncryption: Adding context menu items for decrypted media");
+        
+        const isImage = isDecryptedImage(props.src);
+        const isVideo = isDecryptedVideo(props.src);
+        const mediaType = isImage ? "Image" : "Video";
         
         // Find the group with copy-native-link (where "Copy Link" and "Open Link" are)
         const group = findGroupChildrenByChildId("copy-native-link", children);
         console.log("ChatEncryption: Found copy-native-link group:", group);
         
         if (group) {
-            // Add copy and save options for decrypted images in the same group as copy/open link
+            // Add copy and save options for decrypted media in the same group as copy/open link
             group.push(
                 <Menu.MenuItem
-                    id="vc-copy-decrypted-image"
-                    label="Copy Image"
+                    id={`vc-copy-decrypted-${mediaType.toLowerCase()}`}
+                    label={`Copy ${mediaType}`}
                     icon={EncryptionIcon}
-                    action={() => copyDecryptedImage(props.src)}
+                    action={() => isImage ? copyDecryptedImage(props.src) : copyDecryptedVideo(props.src)}
                 />,
                 <Menu.MenuItem
-                    id="vc-save-decrypted-image"
-                    label="Save Image"
+                    id={`vc-save-decrypted-${mediaType.toLowerCase()}`}
+                    label={`Save ${mediaType}`}
                     icon={EncryptionIcon}
-                    action={() => saveDecryptedImage(props.src)}
+                    action={() => isImage ? saveDecryptedImage(props.src) : saveDecryptedVideo(props.src)}
                 />
             );
             
@@ -198,21 +229,21 @@ const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => 
             // Fallback: add to main children if group not found
             children.push(
                 <Menu.MenuItem
-                    id="vc-copy-decrypted-image"
-                    label="Copy Image"
+                    id={`vc-copy-decrypted-${mediaType.toLowerCase()}`}
+                    label={`Copy ${mediaType}`}
                     icon={EncryptionIcon}
-                    action={() => copyDecryptedImage(props.src)}
+                    action={() => isImage ? copyDecryptedImage(props.src) : copyDecryptedVideo(props.src)}
                 />,
                 <Menu.MenuItem
-                    id="vc-save-decrypted-image"
-                    label="Save Image"
+                    id={`vc-save-decrypted-${mediaType.toLowerCase()}`}
+                    label={`Save ${mediaType}`}
                     icon={EncryptionIcon}
-                    action={() => saveDecryptedImage(props.src)}
+                    action={() => isImage ? saveDecryptedImage(props.src) : saveDecryptedVideo(props.src)}
                 />
             );
         }
     } else {
-        console.log("ChatEncryption: Not a decrypted image, skipping");
+        console.log("ChatEncryption: Not decrypted media, skipping");
     }
 };
 
@@ -235,6 +266,32 @@ function isDecryptedImage(imageUrl: string): boolean {
     
     console.log("ChatEncryption: Is data URL:", isDataUrl, "Is in cache:", isInCache);
     return isDataUrl || isInCache;
+}
+
+// Helper function to check if a video URL is from our decrypted cache
+function isDecryptedVideo(videoUrl: string): boolean {
+    console.log("ChatEncryption: Checking if video is decrypted:", videoUrl?.substring(0, 50));
+    // Our decrypted videos use data URLs
+    const isDataUrl = videoUrl?.startsWith('data:video/');
+    
+    // Also check if this URL exists in our decrypted videos cache
+    const decryptedVideos = getDecryptedVideos();
+    let isInCache = false;
+    for (const [key, videoInfo] of decryptedVideos.entries()) {
+        const cachedDataUrl = `data:${videoInfo.mimeType};base64,${videoInfo.videoData}`;
+        if (cachedDataUrl === videoUrl) {
+            isInCache = true;
+            break;
+        }
+    }
+    
+    console.log("ChatEncryption: Is video data URL:", isDataUrl, "Is in cache:", isInCache);
+    return isDataUrl || isInCache;
+}
+
+// Helper function to check if a media URL is from our decrypted cache (images or videos)
+function isDecryptedMedia(mediaUrl: string): boolean {
+    return isDecryptedImage(mediaUrl) || isDecryptedVideo(mediaUrl);
 }
 
 // Helper function to copy decrypted image to clipboard
@@ -368,6 +425,97 @@ async function saveDecryptedImage(imageUrl: string) {
     }
 }
 
+// Helper function to copy decrypted video to clipboard
+async function copyDecryptedVideo(videoUrl: string) {
+    try {
+        // Convert data URL to blob
+        const response = await fetch(videoUrl);
+        const videoData = await response.blob();
+        
+        // Get original video info from our cache
+        const decryptedVideos = getDecryptedVideos();
+        let originalMimeType = videoData.type;
+        let filename = "video";
+        
+        // Find the original video data to get proper mime type and filename
+        for (const [key, videoInfo] of decryptedVideos.entries()) {
+            const cachedDataUrl = `data:${videoInfo.mimeType};base64,${videoInfo.videoData}`;
+            if (cachedDataUrl === videoUrl) {
+                originalMimeType = videoInfo.mimeType;
+                filename = videoInfo.filename;
+                console.log("ChatEncryption: Found original video info:", filename, originalMimeType);
+                break;
+            }
+        }
+        
+        // Try to copy video to clipboard (note: video clipboard support is limited)
+        try {
+            const clipboardData: Record<string, Blob> = {};
+            
+            // Add the original format
+            if (originalMimeType && originalMimeType.startsWith('video/')) {
+                clipboardData[originalMimeType] = videoData;
+                console.log("ChatEncryption: Adding original video format to clipboard:", originalMimeType);
+            }
+            
+            // Copy to clipboard
+            await navigator.clipboard.write([new ClipboardItem(clipboardData)]);
+            
+            console.log(`ChatEncryption: Successfully copied decrypted video "${filename}" to clipboard in original format (${originalMimeType})`);
+        } catch (error) {
+            console.warn("ChatEncryption: Video clipboard not supported, falling back to save:", error);
+            // Fallback: save the video instead since video clipboard support is limited
+            await saveDecryptedVideo(videoUrl);
+        }
+        
+    } catch (error) {
+        console.error("ChatEncryption: Failed to copy decrypted video:", error);
+    }
+}
+
+// Helper function to save decrypted video
+async function saveDecryptedVideo(videoUrl: string) {
+    try {
+        // Convert data URL to blob
+        const response = await fetch(videoUrl);
+        const videoData = await response.blob();
+        
+        // Get original filename from decrypted videos cache or create default
+        const decryptedVideos = getDecryptedVideos();
+        let filename = "decrypted_video.mp4";
+        
+        // Try to find the original filename
+        for (const [key, videoInfo] of decryptedVideos.entries()) {
+            const cachedDataUrl = `data:${videoInfo.mimeType};base64,${videoInfo.videoData}`;
+            if (cachedDataUrl === videoUrl) {
+                filename = videoInfo.filename;
+                break;
+            }
+        }
+        
+        // Create file and trigger download
+        const file = new File([videoData], filename, { type: videoData.type });
+        
+        // Create download link
+        const downloadUrl = URL.createObjectURL(file);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        link.style.display = 'none';
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        // Clean up object URL
+        URL.revokeObjectURL(downloadUrl);
+        
+        console.log("ChatEncryption: Successfully saved decrypted video:", filename);
+    } catch (error) {
+        console.error("ChatEncryption: Failed to save decrypted video:", error);
+    }
+}
+
 function getMessageContent(message: Message) {
     return message.content
         || message.messageSnapshots?.[0]?.message.content
@@ -421,7 +569,7 @@ export default definePlugin({
                         if (uploadConfig && uploadConfig.files && Array.isArray(uploadConfig.files)) {
                             console.log("ChatEncryption: Found files in uploadConfig:", uploadConfig.files);
                             
-                            if (settings.store.autoEncryptImages && settings.store.autoEncrypt && settings.store.secretPhrase) {
+                            if ((settings.store.autoEncryptImages || settings.store.autoEncryptVideos) && settings.store.autoEncrypt && settings.store.secretPhrase) {
                                 console.log("ChatEncryption: Processing files...");
                                 const processedFiles = await this.processFilesBeforeAdd(uploadConfig.files);
                                 
@@ -467,22 +615,25 @@ export default definePlugin({
         const filesArray = Array.isArray(files) ? files : [files];
         console.log("ChatEncryption: filesArray:", filesArray);
         
-        if (!settings.store.autoEncryptImages || !settings.store.autoEncrypt || !settings.store.secretPhrase) {
-            console.log("ChatEncryption: Skipping - settings not enabled");
+        if (!settings.store.autoEncrypt || !settings.store.secretPhrase) {
+            console.log("ChatEncryption: Skipping - encryption not enabled or no secret phrase");
             return files;
         }
 
-        // Process each file and replace with encrypted version if it's an image
+        // Process each file and replace with encrypted version if it's an image or video
         const processedFiles = [];
         for (let i = 0; i < filesArray.length; i++) {
             const fileItem = filesArray[i];
             console.log(`ChatEncryption: Processing file ${i}:`, fileItem);
             
-            if (fileItem && isImageFile(fileItem)) {
+            const actualFile = fileItem.file || fileItem;
+            const shouldEncryptImage = isImageFile(fileItem) && settings.store.autoEncryptImages;
+            const shouldEncryptVideo = isVideoFile(fileItem) && settings.store.autoEncryptVideos;
+            
+            if (fileItem && (shouldEncryptImage || shouldEncryptVideo)) {
                 try {
-                    // Extract the actual File object from Discord's wrapper
-                    const actualFile = fileItem.file || fileItem;
-                    console.log("ChatEncryption: Encrypting image file:", actualFile.name);
+                    const fileType = shouldEncryptImage ? "image" : "video";
+                    console.log(`ChatEncryption: Encrypting ${fileType} file:`, actualFile.name);
                     
                     const encryptedFile = await createEncryptedFile(actualFile);
                     console.log("ChatEncryption: Created encrypted file:", encryptedFile);
@@ -494,14 +645,14 @@ export default definePlugin({
                     };
                     
                     processedFiles.push(processedFileItem);
-                    console.log("ChatEncryption: Successfully processed image file");
+                    console.log(`ChatEncryption: Successfully processed ${fileType} file`);
                     
                 } catch (error) {
                     console.error("ChatEncryption: Failed to encrypt file:", error);
                     processedFiles.push(fileItem); // fallback to original
                 }
             } else {
-                console.log(`ChatEncryption: File ${i} is not an image, keeping original`);
+                console.log(`ChatEncryption: File ${i} is not an encryptable type or encryption disabled, keeping original`);
                 processedFiles.push(fileItem);
             }
         }
@@ -570,6 +721,89 @@ export default definePlugin({
         console.log("ChatEncryption: Finished processing all uploads");
     },
 
+    setupDownloadInterception() {
+        console.log("ChatEncryption: Setting up download interception for encrypted videos...");
+        
+        // Intercept clicks on download buttons for encrypted videos
+        document.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            
+            // Check if this is a download button or link
+            if (target.closest('[data-role="button"]') || target.closest('a[download]') || target.closest('[aria-label*="download"]')) {
+                // Look for video elements in the DOM to find encrypted videos
+                const videoContainer = target.closest('[class*="attachment"], [class*="media"]');
+                if (videoContainer) {
+                    const video = videoContainer.querySelector('video');
+                    if (video && video.src && video.src.startsWith('blob:')) {
+                        // This might be an encrypted video, check if we can find it in our cache
+                        const decryptedVideos = getDecryptedVideos();
+                        
+                        for (const [key, videoData] of decryptedVideos.entries()) {
+                            // Create the expected blob URL to match against
+                            try {
+                                const binaryString = atob(videoData.videoData);
+                                const bytes = new Uint8Array(binaryString.length);
+                                for (let i = 0; i < binaryString.length; i++) {
+                                    bytes[i] = binaryString.charCodeAt(i);
+                                }
+                                const blob = new Blob([bytes], { type: videoData.mimeType });
+                                const blobUrl = URL.createObjectURL(blob);
+                                
+                                // Check if this matches the video source (approximate check)
+                                if (video.src === blobUrl || videoContainer.textContent?.includes(videoData.filename)) {
+                                    console.log("ChatEncryption: Intercepting download for encrypted video:", videoData.filename);
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    
+                                    // Trigger custom download
+                                    this.downloadEncryptedVideo(videoData);
+                                    URL.revokeObjectURL(blobUrl);
+                                    return;
+                                }
+                                URL.revokeObjectURL(blobUrl);
+                            } catch (error) {
+                                // Skip invalid entries
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }, true); // Use capture phase to intercept early
+    },
+
+    downloadEncryptedVideo(videoData) {
+        try {
+            // Convert base64 back to blob
+            const binaryString = atob(videoData.videoData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            const blob = new Blob([bytes], { type: videoData.mimeType });
+            const file = new File([blob], videoData.filename, { type: videoData.mimeType });
+            
+            // Create download link
+            const downloadUrl = URL.createObjectURL(file);
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = videoData.filename;
+            link.style.display = 'none';
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Clean up
+            URL.revokeObjectURL(downloadUrl);
+            
+            console.log("ChatEncryption: Successfully downloaded encrypted video:", videoData.filename);
+        } catch (error) {
+            console.error("ChatEncryption: Failed to download encrypted video:", error);
+        }
+    },
+
     start() {
         // Clean up old cached data without dimensions
         cleanupLegacyCache();
@@ -579,6 +813,9 @@ export default definePlugin({
         
         // Intercept Discord's upload functions at runtime
         this.setupUploadInterception();
+        
+        // Setup download interception for encrypted videos
+        this.setupDownloadInterception();
     },
 
     stop() {
