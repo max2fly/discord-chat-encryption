@@ -9,7 +9,7 @@ import { ChannelStore, Menu } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
 import { DecryptionModal } from "./DecryptionModal";
-import { EncryptionAccessory, handleDecryption, getDecryptedMessages } from "./EncryptionAccessory";
+import { EncryptionAccessory, handleDecryption, getDecryptedMessages, getDecryptedImages } from "./EncryptionAccessory";
 import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
 import { settings } from "./settings";
 import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage } from "./utils";
@@ -54,59 +54,319 @@ async function createEncryptedFile(originalFile: File): Promise<File> {
     });
 }
 
-const messageCtxPatch: NavContextMenuPatchCallback = (children, { message }: { message: Message; }) => {
-    const content = getMessageContent(message);
-    if (!content) return;
+const messageCtxPatch: NavContextMenuPatchCallback = (children, props) => {
+    console.log("ChatEncryption: Message context menu patch called with props:", props);
+    
+    // Handle text decryption - check if there's a message
+    if (props?.message) {
+        const message = props.message;
+        const content = getMessageContent(message);
+        
+        if (content) {
+            const group = findGroupChildrenByChildId("copy-text", children);
+            if (group) {
+                // Add decrypt message option
+                group.splice(group.findIndex(c => c?.props?.id === "copy-text") + 1, 0, (
+                    <Menu.MenuItem
+                        id="vc-decrypt"
+                        label="Decrypt Message"
+                        icon={EncryptionIcon}
+                        action={async () => {
+                            let contentToDecrypt = content;
 
-    const group = findGroupChildrenByChildId("copy-text", children);
-    if (!group) return;
+                            // Check if this is a hidden message first
+                            if (isHiddenMessage(content)) {
+                                const extractedEncrypted = extractHiddenMessage(content);
+                                if (extractedEncrypted) {
+                                    contentToDecrypt = extractedEncrypted;
+                                }
+                            }
 
-    group.splice(group.findIndex(c => c?.props?.id === "copy-text") + 1, 0, (
-        <Menu.MenuItem
-            id="vc-decrypt"
-            label="Decrypt Message"
-            icon={EncryptionIcon}
-            action={async () => {
-                let contentToDecrypt = content;
+                            if (isEncryptedMessage(contentToDecrypt)) {
+                                // Try auto-decryption first
+                                const allPhrases = [
+                                    settings.store.secretPhrase,
+                                    ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+                                ].filter(Boolean);
 
-                // Check if this is a hidden message first
-                if (isHiddenMessage(content)) {
-                    const extractedEncrypted = extractHiddenMessage(content);
-                    if (extractedEncrypted) {
-                        contentToDecrypt = extractedEncrypted;
-                    }
-                }
+                                if (allPhrases.length > 0) {
+                                    const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
+                                    if (result.success) {
+                                        handleDecryption(message.id, result);
+                                        return;
+                                    }
+                                }
+                            }
 
-                if (isEncryptedMessage(contentToDecrypt)) {
-                    // Try auto-decryption first
-                    const allPhrases = [
-                        settings.store.secretPhrase,
-                        ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-                    ].filter(Boolean);
-
-                    if (allPhrases.length > 0) {
-                        const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
-                        if (result.success) {
-                            handleDecryption(message.id, result);
-                            return;
-                        }
-                    }
-                }
-
-                // Show manual decryption modal
-                openModal(props => (
-                    <DecryptionModal
-                        rootProps={props}
-                        encryptedContent={contentToDecrypt}
-                        onSuccess={(decryptedText, usedPhrase) => {
-                            handleDecryption(message.id, { text: decryptedText, success: true });
+                            // Show manual decryption modal
+                            openModal(modalProps => (
+                                <DecryptionModal
+                                    rootProps={modalProps}
+                                    encryptedContent={contentToDecrypt}
+                                    onSuccess={(decryptedText, usedPhrase) => {
+                                        handleDecryption(message.id, { text: decryptedText, success: true });
+                                    }}
+                                />
+                            ));
                         }}
                     />
                 ));
-            }}
-        />
-    ));
+            }
+        }
+    }
+
+    // Handle image copy/save for decrypted images - similar to reverse image search
+    if (props?.reverseImageSearchType === "img") {
+        console.log("ChatEncryption: Image in message context menu detected");
+        const src = props.itemHref ?? props.itemSrc;
+        
+        if (src && isDecryptedImage(src)) {
+            console.log("ChatEncryption: Adding copy/save options for decrypted image in message context");
+            // Try to find the group with copy-native-link (where Copy Link and Open Link are)
+            const group = findGroupChildrenByChildId("copy-native-link", children) || 
+                         findGroupChildrenByChildId("copy-link", children) ||
+                         findGroupChildrenByChildId("open-native-link", children);
+            
+            console.log("ChatEncryption: Found group for copy/open link:", group);
+            
+            if (group) {
+                group.push(
+                    <Menu.MenuItem
+                        id="vc-copy-decrypted-image-msg"
+                        label="Copy Image"
+                        icon={EncryptionIcon}
+                        action={() => copyDecryptedImage(src)}
+                    />,
+                    <Menu.MenuItem
+                        id="vc-save-decrypted-image-msg"
+                        label="Save Image"
+                        icon={EncryptionIcon}
+                        action={() => saveDecryptedImage(src)}
+                    />
+                );
+                console.log("ChatEncryption: Added copy/save options to message context menu");
+            } else {
+                console.log("ChatEncryption: No suitable group found in message context");
+            }
+        }
+    }
 };
+
+// Image context menu patch for encrypted images - simplified like reverse image search
+const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => {
+    console.log("ChatEncryption: Image context menu patch called with props:", props);
+    console.log("ChatEncryption: Props src:", props?.src);
+    console.log("ChatEncryption: Props keys:", Object.keys(props || {}));
+    
+    if (!props?.src) {
+        console.log("ChatEncryption: No src, skipping");
+        return;
+    }
+    
+    // Check if this is a decrypted image (data URL from our cache)
+    const isDecrypted = isDecryptedImage(props.src);
+    console.log("ChatEncryption: Is decrypted image:", isDecrypted);
+    console.log("ChatEncryption: Image URL starts with:", props.src.substring(0, 50));
+    
+    if (isDecrypted) {
+        console.log("ChatEncryption: Adding context menu items for decrypted image");
+        
+        // Find the group with copy-native-link (where "Copy Link" and "Open Link" are)
+        const group = findGroupChildrenByChildId("copy-native-link", children);
+        console.log("ChatEncryption: Found copy-native-link group:", group);
+        
+        if (group) {
+            // Add copy and save options for decrypted images in the same group as copy/open link
+            group.push(
+                <Menu.MenuItem
+                    id="vc-copy-decrypted-image"
+                    label="Copy Image"
+                    icon={EncryptionIcon}
+                    action={() => copyDecryptedImage(props.src)}
+                />,
+                <Menu.MenuItem
+                    id="vc-save-decrypted-image"
+                    label="Save Image"
+                    icon={EncryptionIcon}
+                    action={() => saveDecryptedImage(props.src)}
+                />
+            );
+            
+            console.log("ChatEncryption: Added menu items to copy-native-link group, length now:", group.length);
+        } else {
+            console.log("ChatEncryption: copy-native-link group not found, adding to main children");
+            // Fallback: add to main children if group not found
+            children.push(
+                <Menu.MenuItem
+                    id="vc-copy-decrypted-image"
+                    label="Copy Image"
+                    icon={EncryptionIcon}
+                    action={() => copyDecryptedImage(props.src)}
+                />,
+                <Menu.MenuItem
+                    id="vc-save-decrypted-image"
+                    label="Save Image"
+                    icon={EncryptionIcon}
+                    action={() => saveDecryptedImage(props.src)}
+                />
+            );
+        }
+    } else {
+        console.log("ChatEncryption: Not a decrypted image, skipping");
+    }
+};
+
+// Helper function to check if an image URL is from our decrypted cache
+function isDecryptedImage(imageUrl: string): boolean {
+    console.log("ChatEncryption: Checking if image is decrypted:", imageUrl?.substring(0, 50));
+    // Our decrypted images use data URLs
+    const isDataUrl = imageUrl?.startsWith('data:image/');
+    
+    // Also check if this URL exists in our decrypted images cache
+    const decryptedImages = getDecryptedImages();
+    let isInCache = false;
+    for (const [key, imageInfo] of decryptedImages.entries()) {
+        const cachedDataUrl = `data:${imageInfo.mimeType};base64,${imageInfo.imageData}`;
+        if (cachedDataUrl === imageUrl) {
+            isInCache = true;
+            break;
+        }
+    }
+    
+    console.log("ChatEncryption: Is data URL:", isDataUrl, "Is in cache:", isInCache);
+    return isDataUrl || isInCache;
+}
+
+// Helper function to copy decrypted image to clipboard
+async function copyDecryptedImage(imageUrl: string) {
+    try {
+        // Convert data URL to blob
+        const response = await fetch(imageUrl);
+        let imageData = await response.blob();
+        
+        // Get original image info from our cache
+        const decryptedImages = getDecryptedImages();
+        let originalMimeType = imageData.type;
+        let filename = "image";
+        
+        // Find the original image data to get proper mime type and filename
+        for (const [key, imageInfo] of decryptedImages.entries()) {
+            const cachedDataUrl = `data:${imageInfo.mimeType};base64,${imageInfo.imageData}`;
+            if (cachedDataUrl === imageUrl) {
+                originalMimeType = imageInfo.mimeType;
+                filename = imageInfo.filename;
+                console.log("ChatEncryption: Found original image info:", filename, originalMimeType);
+                break;
+            }
+        }
+        
+        // Try to copy in original format first
+        try {
+            const clipboardData: Record<string, Blob> = {};
+            
+            // Add the original format
+            if (originalMimeType && originalMimeType.startsWith('image/')) {
+                clipboardData[originalMimeType] = imageData;
+                console.log("ChatEncryption: Adding original format to clipboard:", originalMimeType);
+            }
+            
+            // Also add PNG as fallback for compatibility
+            if (originalMimeType !== "image/png") {
+                const bitmap = await createImageBitmap(imageData);
+                const canvas = document.createElement("canvas");
+                canvas.width = bitmap.width;
+                canvas.height = bitmap.height;
+                const ctx = canvas.getContext("2d");
+                if (ctx) {
+                    ctx.drawImage(bitmap, 0, 0);
+                    
+                    const pngBlob = await new Promise<Blob | null>(resolve => {
+                        canvas.toBlob(data => resolve(data), "image/png");
+                    });
+                    
+                    if (pngBlob) {
+                        clipboardData["image/png"] = pngBlob;
+                        console.log("ChatEncryption: Added PNG fallback to clipboard");
+                    }
+                }
+            }
+            
+            // Copy to clipboard with multiple formats
+            await navigator.clipboard.write([new ClipboardItem(clipboardData)]);
+            
+            console.log(`ChatEncryption: Successfully copied decrypted image "${filename}" to clipboard in original format (${originalMimeType})`);
+        } catch (error) {
+            console.warn("ChatEncryption: Failed to copy in original format, falling back to PNG:", error);
+            
+            // Fallback: convert to PNG and copy
+            const bitmap = await createImageBitmap(imageData);
+            const canvas = document.createElement("canvas");
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                ctx.drawImage(bitmap, 0, 0);
+                
+                const pngBlob = await new Promise<Blob | null>(resolve => {
+                    canvas.toBlob(data => resolve(data), "image/png");
+                });
+                
+                if (pngBlob) {
+                    await navigator.clipboard.write([
+                        new ClipboardItem({ "image/png": pngBlob })
+                    ]);
+                    console.log("ChatEncryption: Successfully copied as PNG fallback");
+                }
+            }
+        }
+        
+    } catch (error) {
+        console.error("ChatEncryption: Failed to copy decrypted image:", error);
+    }
+}
+
+// Helper function to save decrypted image
+async function saveDecryptedImage(imageUrl: string) {
+    try {
+        // Convert data URL to blob
+        const response = await fetch(imageUrl);
+        const imageData = await response.blob();
+        
+        // Get original filename from decrypted images cache or create default
+        const decryptedImages = getDecryptedImages();
+        let filename = "decrypted_image.png";
+        
+        // Try to find the original filename
+        for (const [key, imageInfo] of decryptedImages.entries()) {
+            const cachedDataUrl = `data:${imageInfo.mimeType};base64,${imageInfo.imageData}`;
+            if (cachedDataUrl === imageUrl) {
+                filename = imageInfo.filename;
+                break;
+            }
+        }
+        
+        // Create file and trigger download
+        const file = new File([imageData], filename, { type: imageData.type });
+        
+        // Create download link
+        const downloadUrl = URL.createObjectURL(file);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        link.style.display = 'none';
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        // Clean up object URL
+        URL.revokeObjectURL(downloadUrl);
+        
+        console.log("ChatEncryption: Successfully saved decrypted image:", filename);
+    } catch (error) {
+        console.error("ChatEncryption: Failed to save decrypted image:", error);
+    }
+}
 
 function getMessageContent(message: Message) {
     return message.content
@@ -131,7 +391,8 @@ export default definePlugin({
     patches: [],
 
     contextMenus: {
-        "message": messageCtxPatch
+        "message": messageCtxPatch,
+        "image-context": imageContextMenuPatch
     },
 
     renderMessageAccessory: props => <EncryptionAccessory message={props.message} />,
