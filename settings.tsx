@@ -49,5 +49,17 @@ export const settings = definePluginSettings({
         description: "Automatically encrypt video attachments",
         default: false,
         hidden: true
+    },
+    autoEncryptAudio: {
+        type: OptionType.BOOLEAN,
+        description: "Automatically encrypt audio attachments",
+        default: false,
+        hidden: true
+    },
+    autoEncryptFiles: {
+        type: OptionType.BOOLEAN,
+        description: "Automatically encrypt other file attachments",
+        default: false,
+        hidden: true
     }
 });

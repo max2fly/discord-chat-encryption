@@ -109,6 +109,34 @@ function AutoEncryptVideosToggle() {
     );
 }
 
+function AutoEncryptAudioToggle() {
+    const value = settings.use(["autoEncryptAudio"]).autoEncryptAudio;
+
+    return (
+        <FormSwitch
+            title="Auto Encrypt Audio"
+            description="Automatically convert audio attachments to encrypted text messages"
+            value={value}
+            onChange={v => settings.store.autoEncryptAudio = v}
+            hideBorder
+        />
+    );
+}
+
+function AutoEncryptFilesToggle() {
+    const value = settings.use(["autoEncryptFiles"]).autoEncryptFiles;
+
+    return (
+        <FormSwitch
+            title="Auto Encrypt Other Files"
+            description="Automatically convert other file attachments (documents, archives, etc.) to encrypted text messages"
+            value={value}
+            onChange={v => settings.store.autoEncryptFiles = v}
+            hideBorder
+        />
+    );
+}
+
 function BackupSecretPhrasesInput() {
     const [localPhrases, setLocalPhrases] = useState(settings.store.backupSecretPhrases);
     const [showPhrases, setShowPhrases] = useState(false);
@@ -188,6 +216,14 @@ export function EncryptionModal({ rootProps }: { rootProps: ModalProps; }) {
                 <Divider className={Margins.bottom16} />
 
                 <AutoEncryptVideosToggle />
+
+                <Divider className={Margins.bottom16} />
+
+                <AutoEncryptAudioToggle />
+
+                <Divider className={Margins.bottom16} />
+
+                <AutoEncryptFilesToggle />
 
                 <Divider className={Margins.bottom16} />
 

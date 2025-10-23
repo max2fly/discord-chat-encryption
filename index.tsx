@@ -9,10 +9,10 @@ import { ChannelStore, Menu } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
 import { DecryptionModal } from "./DecryptionModal";
-import { EncryptionAccessory, handleDecryption, getDecryptedMessages, getDecryptedImages, getDecryptedVideos } from "./EncryptionAccessory";
+import { EncryptionAccessory, handleDecryption, getDecryptedMessages, getDecryptedImages, getDecryptedVideos, getDecryptedAudio, getDecryptedFiles } from "./EncryptionAccessory";
 import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
 import { settings } from "./settings";
-import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage, encryptVideoToMessage } from "./utils";
+import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage, encryptVideoToMessage, encryptAudioToMessage, encryptFileToMessage } from "./utils";
 import { cleanupLegacyCache } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
@@ -53,6 +53,20 @@ function isVideoFile(fileItem: any): boolean {
     return actualFile.type.startsWith('video/');
 }
 
+// Helper function to check if file is an audio file
+function isAudioFile(fileItem: any): boolean {
+    // Handle both direct File objects and Discord's file wrapper objects
+    const actualFile = fileItem?.file || fileItem;
+    
+    if (!actualFile || !actualFile.type) {
+        console.log("ChatEncryption: No file.type found for:", fileItem);
+        return false;
+    }
+    
+    console.log("ChatEncryption: Checking file type:", actualFile.type);
+    return actualFile.type.startsWith('audio/');
+}
+
 // Helper function to create encrypted file replacement
 async function createEncryptedFile(originalFile: File): Promise<File> {
     let result;
@@ -62,8 +76,11 @@ async function createEncryptedFile(originalFile: File): Promise<File> {
         result = await encryptImageToMessage(originalFile, settings.store.secretPhrase);
     } else if (originalFile.type.startsWith('video/')) {
         result = await encryptVideoToMessage(originalFile, settings.store.secretPhrase);
+    } else if (originalFile.type.startsWith('audio/')) {
+        result = await encryptAudioToMessage(originalFile, settings.store.secretPhrase);
     } else {
-        throw new Error("Unsupported file type for encryption");
+        // Wildcard catch for any other file type
+        result = await encryptFileToMessage(originalFile, settings.store.secretPhrase);
     }
     
     if (!result.success) {
@@ -576,7 +593,7 @@ export default definePlugin({
                         if (uploadConfig && uploadConfig.files && Array.isArray(uploadConfig.files)) {
                             console.log("ChatEncryption: Found files in uploadConfig:", uploadConfig.files);
                             
-                            if ((settings.store.autoEncryptImages || settings.store.autoEncryptVideos) && settings.store.autoEncrypt && settings.store.secretPhrase) {
+                            if ((settings.store.autoEncryptImages || settings.store.autoEncryptVideos || settings.store.autoEncryptAudio || settings.store.autoEncryptFiles) && settings.store.autoEncrypt && settings.store.secretPhrase) {
                                 console.log("ChatEncryption: Processing files...");
                                 const processedFiles = await this.processFilesBeforeAdd(uploadConfig.files);
                                 
@@ -627,7 +644,7 @@ export default definePlugin({
             return files;
         }
 
-        // Process each file and replace with encrypted version if it's an image or video
+        // Process each file and replace with encrypted version if encryption is enabled for that type
         const processedFiles = [];
         for (let i = 0; i < filesArray.length; i++) {
             const fileItem = filesArray[i];
@@ -636,10 +653,16 @@ export default definePlugin({
             const actualFile = fileItem.file || fileItem;
             const shouldEncryptImage = isImageFile(fileItem) && settings.store.autoEncryptImages;
             const shouldEncryptVideo = isVideoFile(fileItem) && settings.store.autoEncryptVideos;
+            const shouldEncryptAudio = isAudioFile(fileItem) && settings.store.autoEncryptAudio;
+            const shouldEncryptFile = !isImageFile(fileItem) && !isVideoFile(fileItem) && !isAudioFile(fileItem) && settings.store.autoEncryptFiles;
             
-            if (fileItem && (shouldEncryptImage || shouldEncryptVideo)) {
+            if (fileItem && (shouldEncryptImage || shouldEncryptVideo || shouldEncryptAudio || shouldEncryptFile)) {
                 try {
-                    const fileType = shouldEncryptImage ? "image" : "video";
+                    let fileType = "file";
+                    if (shouldEncryptImage) fileType = "image";
+                    else if (shouldEncryptVideo) fileType = "video";
+                    else if (shouldEncryptAudio) fileType = "audio";
+                    
                     console.log(`ChatEncryption: Encrypting ${fileType} file:`, actualFile.name);
                     
                     const encryptedFile = await createEncryptedFile(actualFile);
@@ -778,6 +801,9 @@ export default definePlugin({
                                 return; // Prevent original download
                             }
                         }
+
+                        // Note: Audio and generic file downloads are handled by DOM interception only
+                        // since they will always fail the original download method anyway
                         
                         // Call original function for non-encrypted files
                         return originalFunc(url, filename, ...args);
@@ -818,7 +844,7 @@ export default definePlugin({
         document.addEventListener('click', (event) => {
             const target = event.target as HTMLElement;
             
-            // More comprehensive download button detection
+            // More comprehensive download action detection
             const isDownloadAction = target.closest('a[download]') || 
                                    target.closest('[aria-label*="download"]') ||
                                    target.closest('[aria-label*="Download"]') ||
@@ -827,20 +853,26 @@ export default definePlugin({
                                    target.closest('button[class*="download"]') ||
                                    target.closest('[role="menuitem"]') && 
                                    target.textContent?.toLowerCase().includes('download');
+
+            // Also check for filename clicks (another way Discord allows file downloads)
+            const isFilenameClick = target.closest('[class*="filename"]') ||
+                                  target.closest('[class*="attachment"]') && target.tagName === 'A' ||
+                                  (target.tagName === 'A' && target.href && target.href.includes('cdn.discordapp.com'));
             
-            if (isDownloadAction) {
-                console.log("ChatEncryption: Download action detected, checking for encrypted video");
+            if (isDownloadAction || isFilenameClick) {
+                console.log("ChatEncryption: Download/filename click detected, checking for encrypted media");
                 
-                // Look for video containers in various ways
-                const videoContainer = target.closest('[class*="attachment"]') || 
+                // Look for media containers in various ways
+                const mediaContainer = target.closest('[class*="attachment"]') || 
                                      target.closest('[class*="media"]') ||
                                      target.closest('[class*="embed"]') ||
                                      // Look in the broader message area
                                      target.closest('[id^="message-"]') ||
                                      target.closest('[class*="message"]');
                 
-                if (videoContainer) {
-                    const video = videoContainer.querySelector('video') as HTMLVideoElement;
+                if (mediaContainer) {
+                    // Check for video elements first
+                    const video = mediaContainer.querySelector('video') as HTMLVideoElement;
                     console.log("ChatEncryption: Found video element:", video);
                     console.log("ChatEncryption: Video encrypted key:", (video as any)?.encryptedVideoKey);
                     
@@ -860,11 +892,64 @@ export default definePlugin({
                             console.warn("ChatEncryption: Could not find video data for download, key:", videoKey);
                             console.warn("ChatEncryption: Available video keys:", Array.from(decryptedVideos.keys()));
                         }
-                    } else {
-                        console.log("ChatEncryption: Video element not marked as encrypted or no video found");
+                        return;
                     }
-                } else {
-                    console.log("ChatEncryption: No video container found for download action");
+                    
+                    // Check for audio elements
+                    const audio = mediaContainer.querySelector('audio') as HTMLAudioElement;
+                    
+                    // If audio element exists but no encrypted key, try to find it by checking all audio data
+                    if (audio && !(audio as any).encryptedAudioKey) {
+                        const decryptedAudio = getDecryptedAudio();
+                        for (const [key, audioData] of decryptedAudio.entries()) {
+                            // Try to match by checking if this audio element should have this key
+                            const messageId = key.split('-')[0];
+                            const currentMessage = mediaContainer.closest('[id^="message-"]');
+                            if (currentMessage && currentMessage.id.includes(messageId)) {
+                                (audio as any).encryptedAudioKey = key;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (audio && (audio as any).encryptedAudioKey) {
+                        console.log("ChatEncryption: DOM intercepting download for encrypted audio");
+                        event.preventDefault();
+                        event.stopPropagation();
+                        
+                        const audioKey = (audio as any).encryptedAudioKey;
+                        const decryptedAudio = getDecryptedAudio();
+                        const audioData = decryptedAudio.get(audioKey);
+                        
+                        if (audioData) {
+                            console.log("ChatEncryption: Found audio data, triggering download:", audioData.filename);
+                            this.downloadEncryptedAudio(audioData);
+                        } else {
+                            console.warn("ChatEncryption: Could not find audio data for download, key:", audioKey);
+                            console.warn("ChatEncryption: Available audio keys:", Array.from(decryptedAudio.keys()));
+                        }
+                        return;
+                    }
+                    
+                    // Check for file attachments by looking for filename in the container
+                    const attachmentElements = mediaContainer.querySelectorAll('[class*="filename"], [class*="attachment"], a[download]');
+                    for (const attachmentEl of attachmentElements) {
+                        const filename = attachmentEl.textContent || (attachmentEl as HTMLAnchorElement).download || '';
+                        
+                        if (filename) {
+                            const decryptedFiles = getDecryptedFiles();
+                            for (const [key, fileData] of decryptedFiles.entries()) {
+                                if (fileData.filename === filename.trim()) {
+                                    console.log("ChatEncryption: DOM intercepting download for encrypted file:", fileData.filename);
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    
+                                    this.downloadEncryptedFile(fileData);
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }, true);
@@ -1105,6 +1190,70 @@ export default definePlugin({
             console.log("ChatEncryption: Successfully downloaded encrypted video:", videoData.filename);
         } catch (error) {
             console.error("ChatEncryption: Failed to download encrypted video:", error);
+        }
+    },
+
+    downloadEncryptedAudio(audioData) {
+        try {
+            // Convert base64 back to blob
+            const binaryString = atob(audioData.audioData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            const blob = new Blob([bytes], { type: audioData.mimeType });
+            const file = new File([blob], audioData.filename, { type: audioData.mimeType });
+            
+            // Create download link
+            const downloadUrl = URL.createObjectURL(file);
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = audioData.filename;
+            link.style.display = 'none';
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Clean up
+            URL.revokeObjectURL(downloadUrl);
+            
+            console.log("ChatEncryption: Successfully downloaded encrypted audio:", audioData.filename);
+        } catch (error) {
+            console.error("ChatEncryption: Failed to download encrypted audio:", error);
+        }
+    },
+
+    downloadEncryptedFile(fileData) {
+        try {
+            // Convert base64 back to blob
+            const binaryString = atob(fileData.fileData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            
+            const blob = new Blob([bytes], { type: fileData.mimeType });
+            const file = new File([blob], fileData.filename, { type: fileData.mimeType });
+            
+            // Create download link
+            const downloadUrl = URL.createObjectURL(file);
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = fileData.filename;
+            link.style.display = 'none';
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Clean up
+            URL.revokeObjectURL(downloadUrl);
+            
+            console.log("ChatEncryption: Successfully downloaded encrypted file:", fileData.filename);
+        } catch (error) {
+            console.error("ChatEncryption: Failed to download encrypted file:", error);
         }
     },
 

@@ -556,3 +556,207 @@ export async function decryptVideoMessage(encryptedMessage: string, secretPhrase
         return { success: false, error: "Video decryption failed" };
     }
 }
+
+// Audio encryption utilities
+const AUDIO_ENCRYPTION_PREFIX = "[AUD_ENC:v1:";
+const AUDIO_ENCRYPTION_SUFFIX = "]";
+
+export interface AudioEncryptionData {
+    filename: string;
+    mimeType: string;
+    audioData: string; // base64
+    duration?: number;
+}
+
+export function isEncryptedAudioMessage(message: string): boolean {
+    return message.includes(AUDIO_ENCRYPTION_PREFIX) && message.includes(AUDIO_ENCRYPTION_SUFFIX);
+}
+
+export async function encryptAudioToMessage(file: File, secretPhrase: string): Promise<EncryptionResult> {
+    if (!file || !secretPhrase) {
+        return { text: "", success: false, error: "Missing file or secret phrase" };
+    }
+
+    try {
+        // Convert file to base64
+        const arrayBuffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(arrayBuffer);
+        
+        // Extract audio metadata
+        const metadata = await getAudioMetadata(file);
+        
+        // Create audio data object
+        const audioData: AudioEncryptionData = {
+            filename: file.name,
+            mimeType: file.type,
+            audioData: base64Data,
+            duration: metadata.duration
+        };
+        
+        // Encrypt the audio data as JSON
+        const jsonData = JSON.stringify(audioData);
+        const encrypted = await encrypt(jsonData, secretPhrase);
+        
+        if (!encrypted.success) {
+            return { text: "", success: false, error: encrypted.error };
+        }
+        
+        // Create audio encryption message format
+        const audioMessage = `${AUDIO_ENCRYPTION_PREFIX}${encrypted.text.slice(ENCRYPTION_PREFIX.length, -ENCRYPTION_SUFFIX.length)}${AUDIO_ENCRYPTION_SUFFIX}`;
+        
+        return { text: audioMessage, success: true };
+        
+    } catch (error) {
+        console.error("Audio encryption failed:", error);
+        return { text: "", success: false, error: "Audio encryption failed" };
+    }
+}
+
+// Helper function to get audio metadata from a file
+async function getAudioMetadata(file: File): Promise<{duration?: number}> {
+    return new Promise((resolve) => {
+        const audio = document.createElement('audio');
+        const url = URL.createObjectURL(file);
+        
+        audio.onloadedmetadata = () => {
+            URL.revokeObjectURL(url);
+            resolve({
+                duration: audio.duration || undefined
+            });
+        };
+        
+        audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            // Return empty metadata on error, don't fail the entire encryption
+            resolve({});
+        };
+        
+        audio.src = url;
+    });
+}
+
+export async function decryptAudioMessage(encryptedMessage: string, secretPhrase: string): Promise<{
+    success: boolean;
+    audioData?: AudioEncryptionData;
+    error?: string;
+}> {
+    if (!encryptedMessage || !secretPhrase) {
+        return { success: false, error: "Missing message or secret phrase" };
+    }
+
+    try {
+        // Extract encrypted content
+        if (!isEncryptedAudioMessage(encryptedMessage)) {
+            return { success: false, error: "Not an encrypted audio message" };
+        }
+        
+        const content = encryptedMessage.slice(AUDIO_ENCRYPTION_PREFIX.length, -AUDIO_ENCRYPTION_SUFFIX.length);
+        
+        // Reconstruct full encryption format for decryption
+        const fullEncrypted = `${ENCRYPTION_PREFIX}${content}${ENCRYPTION_SUFFIX}`;
+        
+        // Decrypt the content
+        const decrypted = await decrypt(fullEncrypted, secretPhrase);
+        if (!decrypted.success) {
+            return { success: false, error: decrypted.error };
+        }
+        
+        // Parse audio data
+        const audioData: AudioEncryptionData = JSON.parse(decrypted.text);
+        
+        return { success: true, audioData };
+        
+    } catch (error) {
+        console.error("Audio decryption failed:", error);
+        return { success: false, error: "Audio decryption failed" };
+    }
+}
+
+// Generic file encryption utilities
+const FILE_ENCRYPTION_PREFIX = "[FILE_ENC:v1:";
+const FILE_ENCRYPTION_SUFFIX = "]";
+
+export interface FileEncryptionData {
+    filename: string;
+    mimeType: string;
+    fileData: string; // base64
+    size: number;
+}
+
+export function isEncryptedFileMessage(message: string): boolean {
+    return message.includes(FILE_ENCRYPTION_PREFIX) && message.includes(FILE_ENCRYPTION_SUFFIX);
+}
+
+export async function encryptFileToMessage(file: File, secretPhrase: string): Promise<EncryptionResult> {
+    if (!file || !secretPhrase) {
+        return { text: "", success: false, error: "Missing file or secret phrase" };
+    }
+
+    try {
+        // Convert file to base64
+        const arrayBuffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(arrayBuffer);
+        
+        // Create file data object
+        const fileData: FileEncryptionData = {
+            filename: file.name,
+            mimeType: file.type,
+            fileData: base64Data,
+            size: file.size
+        };
+        
+        // Encrypt the file data as JSON
+        const jsonData = JSON.stringify(fileData);
+        const encrypted = await encrypt(jsonData, secretPhrase);
+        
+        if (!encrypted.success) {
+            return { text: "", success: false, error: encrypted.error };
+        }
+        
+        // Create file encryption message format
+        const fileMessage = `${FILE_ENCRYPTION_PREFIX}${encrypted.text.slice(ENCRYPTION_PREFIX.length, -ENCRYPTION_SUFFIX.length)}${FILE_ENCRYPTION_SUFFIX}`;
+        
+        return { text: fileMessage, success: true };
+        
+    } catch (error) {
+        console.error("File encryption failed:", error);
+        return { text: "", success: false, error: "File encryption failed" };
+    }
+}
+
+export async function decryptFileMessage(encryptedMessage: string, secretPhrase: string): Promise<{
+    success: boolean;
+    fileData?: FileEncryptionData;
+    error?: string;
+}> {
+    if (!encryptedMessage || !secretPhrase) {
+        return { success: false, error: "Missing message or secret phrase" };
+    }
+
+    try {
+        // Extract encrypted content
+        if (!isEncryptedFileMessage(encryptedMessage)) {
+            return { success: false, error: "Not an encrypted file message" };
+        }
+        
+        const content = encryptedMessage.slice(FILE_ENCRYPTION_PREFIX.length, -FILE_ENCRYPTION_SUFFIX.length);
+        
+        // Reconstruct full encryption format for decryption
+        const fullEncrypted = `${ENCRYPTION_PREFIX}${content}${ENCRYPTION_SUFFIX}`;
+        
+        // Decrypt the content
+        const decrypted = await decrypt(fullEncrypted, secretPhrase);
+        if (!decrypted.success) {
+            return { success: false, error: decrypted.error };
+        }
+        
+        // Parse file data
+        const fileData: FileEncryptionData = JSON.parse(decrypted.text);
+        
+        return { success: true, fileData };
+        
+    } catch (error) {
+        console.error("File decryption failed:", error);
+        return { success: false, error: "File decryption failed" };
+    }
+}

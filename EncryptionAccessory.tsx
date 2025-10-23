@@ -5,7 +5,7 @@ import { findByPropsLazy } from "@webpack";
 
 import { EncryptionIcon } from "./EncryptionIcon";
 import { settings } from "./settings";
-import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage, isEncryptedImageMessage, decryptImageMessage, ImageEncryptionData, isEncryptedVideoMessage, decryptVideoMessage, VideoEncryptionData } from "./utils";
+import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage, isEncryptedImageMessage, decryptImageMessage, ImageEncryptionData, isEncryptedVideoMessage, decryptVideoMessage, VideoEncryptionData, isEncryptedAudioMessage, decryptAudioMessage, AudioEncryptionData, isEncryptedFileMessage, decryptFileMessage, FileEncryptionData } from "./utils";
 
 // Cache for downloaded attachment content to avoid re-downloading
 const AttachmentContentCache = new Map<string, string>();
@@ -16,6 +16,8 @@ const UpdateTriggers = new Map<string, () => void>();
 const EncryptedMessageQueue = new Map<string, string>(); // messageId -> encrypted content
 const DecryptedImages = new Map<string, ImageEncryptionData>(); // messageId -> decrypted image data
 const DecryptedVideos = new Map<string, VideoEncryptionData>(); // messageId -> decrypted video data
+const DecryptedAudio = new Map<string, AudioEncryptionData>(); // messageId -> decrypted audio data
+const DecryptedFiles = new Map<string, FileEncryptionData>(); // messageId -> decrypted file data
 const ProcessedAttachments = new Set<string>(); // Track processed attachment URLs to avoid re-processing
 const DownloadQueue = new Map<string, Promise<string>>(); // Track ongoing downloads to avoid duplicates
 const UpgradeProcessed = new Set<string>(); // Track attachments we've already attempted to upgrade
@@ -31,6 +33,14 @@ export function getDecryptedImages() {
 
 export function getDecryptedVideos() {
     return DecryptedVideos;
+}
+
+export function getDecryptedAudio() {
+    return DecryptedAudio;
+}
+
+export function getDecryptedFiles() {
+    return DecryptedFiles;
 }
 
 // Clean up old cached data without dimensions on plugin load
@@ -92,6 +102,36 @@ function markVideoElementForDownload(encryptedVideoKey: string, blobUrl: string)
             }
             break;
         }
+    }
+}
+
+// Function to mark audio elements in DOM for download interception
+function markAudioElementForDownload(encryptedAudioKey: string, blobUrl: string) {
+    // Find audio elements with matching src
+    const audios = document.querySelectorAll('audio') as NodeListOf<HTMLAudioElement>;
+
+    let marked = false;
+    for (const audio of audios) {
+        if (audio.src === blobUrl && !(audio as any).encryptedAudioKey) {
+            (audio as any).encryptedAudioKey = encryptedAudioKey;
+            console.log('ChatEncryption: Marked audio element for download interception:', encryptedAudioKey);
+            marked = true;
+            break;
+        }
+    }
+    
+    if (!marked) {
+        // Retry after a longer delay in case the element isn't ready yet
+        setTimeout(() => {
+            const retryAudios = document.querySelectorAll('audio') as NodeListOf<HTMLAudioElement>;
+            for (const audio of retryAudios) {
+                if (audio.src === blobUrl && !(audio as any).encryptedAudioKey) {
+                    (audio as any).encryptedAudioKey = encryptedAudioKey;
+                    console.log('ChatEncryption: Marked audio element for download interception (retry):', encryptedAudioKey);
+                    break;
+                }
+            }
+        }, 500);
     }
 }
 
@@ -805,6 +845,122 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
                     }
                 }
             }
+        }
+        // Check if this looks like our encrypted audio format
+        else if (textContent.startsWith('[AUD_ENC:v1:')) {
+            console.log("ChatEncryption: Found encrypted audio attachment");
+
+            const allPhrases = [
+                settings.store.secretPhrase,
+                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+            ].filter(Boolean);
+
+            if (allPhrases.length > 0) {
+                // Try to decrypt with all available phrases
+                for (const phrase of allPhrases) {
+                    const result = await decryptAudioMessage(textContent, phrase);
+                    if (result.success && result.audioData) {
+                        console.log("ChatEncryption: Successfully decrypted audio attachment:", result.audioData.filename);
+
+                        // Store the decrypted audio data
+                        DecryptedAudio.set(attachmentKey, result.audioData);
+
+                        // Replace the attachment in the message object directly
+                        const attachmentIndex = message.attachments.findIndex(att => att.id === attachment.id);
+                        if (attachmentIndex !== -1) {
+                            // Convert base64 to blob for audio
+                            const binaryString = atob(result.audioData.audioData);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) {
+                                bytes[i] = binaryString.charCodeAt(i);
+                            }
+
+                            const blob = new Blob([bytes], { type: result.audioData.mimeType });
+                            const blobUrl = URL.createObjectURL(blob);
+
+                            console.log("ChatEncryption: Created audio blob URL, size:", blob.size, "bytes");
+
+                            // Create synthetic audio attachment
+                            const syntheticAttachment = {
+                                ...attachment,
+                                filename: result.audioData.filename,
+                                content_type: result.audioData.mimeType,
+                                url: blobUrl,
+                                proxy_url: blobUrl,
+                                size: blob.size,
+                                isEncryptedAudio: true,
+                                originalBlob: blob,
+                                encryptedAudioKey: attachmentKey,
+                                duration_secs: result.audioData.duration
+                            };
+
+                            // Replace the attachment in the message
+                            message.attachments[attachmentIndex] = syntheticAttachment;
+                            console.log("ChatEncryption: Replaced audio attachment in message with blob URL");
+
+                            // Mark audio element for download interception
+                            setTimeout(() => {
+                                markAudioElementForDownload(attachmentKey, blobUrl);
+                            }, 100);
+                        }
+
+                        // Force re-render of the message
+                        FluxDispatcher.dispatch({
+                            type: "MESSAGE_UPDATE",
+                            message: message
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        // Check if this looks like our encrypted file format
+        else if (textContent.startsWith('[FILE_ENC:v1:')) {
+            console.log("ChatEncryption: Found encrypted file attachment");
+
+            const allPhrases = [
+                settings.store.secretPhrase,
+                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+            ].filter(Boolean);
+
+            if (allPhrases.length > 0) {
+                // Try to decrypt with all available phrases
+                for (const phrase of allPhrases) {
+                    const result = await decryptFileMessage(textContent, phrase);
+                    if (result.success && result.fileData) {
+                        console.log("ChatEncryption: Successfully decrypted file attachment:", result.fileData.filename);
+
+                        // Store the decrypted file data
+                        DecryptedFiles.set(attachmentKey, result.fileData);
+
+                        // Replace the attachment in the message object directly
+                        const attachmentIndex = message.attachments.findIndex(att => att.id === attachment.id);
+                        if (attachmentIndex !== -1) {
+                            // For generic files, we don't create blob URLs immediately
+                            // They'll be created on-demand when user clicks download
+                            const syntheticAttachment = {
+                                ...attachment,
+                                filename: result.fileData.filename,
+                                content_type: result.fileData.mimeType,
+                                size: result.fileData.size,
+                                isEncryptedFile: true,
+                                encryptedFileKey: attachmentKey
+                            };
+
+                            // Replace the attachment in the message
+                            message.attachments[attachmentIndex] = syntheticAttachment;
+                            console.log("ChatEncryption: Replaced file attachment in message");
+                        }
+
+                        // Force re-render of the message
+                        FluxDispatcher.dispatch({
+                            type: "MESSAGE_UPDATE",
+                            message: message
+                        });
+                        break;
+                    }
+                }
+            }
         } else {
             //console.log("ChatEncryption: Attachment does not appear to be encrypted format");
         }
@@ -958,6 +1114,84 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                         }
                     }, 100);
                 }
+
+                // Also check for cached audio that needs restoration
+                const cachedAudioDecryption = DecryptedAudio.get(attachmentKey);
+                if (cachedAudioDecryption && !attachment.url?.startsWith('blob:')) {
+                    // Delay slightly to avoid immediate re-render conflicts
+                    setTimeout(() => {
+                        const currentAttachment = message.attachments?.find(att => att.id === attachment.id);
+                        if (currentAttachment && !currentAttachment.url?.startsWith('blob:')) {
+                            const attachmentIndex = message.attachments.findIndex(att => att.id === attachment.id);
+                            if (attachmentIndex !== -1) {
+                                // Convert base64 to blob for audio
+                                const binaryString = atob(cachedAudioDecryption.audioData);
+                                const bytes = new Uint8Array(binaryString.length);
+                                for (let i = 0; i < binaryString.length; i++) {
+                                    bytes[i] = binaryString.charCodeAt(i);
+                                }
+
+                                const blob = new Blob([bytes], { type: cachedAudioDecryption.mimeType });
+                                const blobUrl = URL.createObjectURL(blob);
+
+                                const syntheticAttachment = {
+                                    ...currentAttachment,
+                                    filename: cachedAudioDecryption.filename,
+                                    content_type: cachedAudioDecryption.mimeType,
+                                    url: blobUrl,
+                                    proxy_url: blobUrl,
+                                    size: blob.size,
+                                    isEncryptedAudio: true,
+                                    originalBlob: blob,
+                                    encryptedAudioKey: attachmentKey,
+                                    duration_secs: cachedAudioDecryption.duration
+                                };
+
+                                message.attachments[attachmentIndex] = syntheticAttachment;
+
+                                FluxDispatcher.dispatch({
+                                    type: "MESSAGE_UPDATE",
+                                    message: message
+                                });
+
+                                // Mark audio element for download interception
+                                setTimeout(() => {
+                                    markAudioElementForDownload(attachmentKey, blobUrl);
+                                }, 100);
+                            }
+                        }
+                    }, 100);
+                }
+
+                // Also check for cached files that need restoration  
+                const cachedFileDecryption = DecryptedFiles.get(attachmentKey);
+                if (cachedFileDecryption) {
+                    // For generic files, we don't need to create blob URLs since they'll be downloaded on demand
+                    // Just mark the attachment as decrypted and update the filename/size
+                    setTimeout(() => {
+                        const currentAttachment = message.attachments?.find(att => att.id === attachment.id);
+                        if (currentAttachment) {
+                            const attachmentIndex = message.attachments.findIndex(att => att.id === attachment.id);
+                            if (attachmentIndex !== -1) {
+                                const syntheticAttachment = {
+                                    ...currentAttachment,
+                                    filename: cachedFileDecryption.filename,
+                                    content_type: cachedFileDecryption.mimeType,
+                                    size: cachedFileDecryption.size,
+                                    isEncryptedFile: true,
+                                    encryptedFileKey: attachmentKey
+                                };
+
+                                message.attachments[attachmentIndex] = syntheticAttachment;
+
+                                FluxDispatcher.dispatch({
+                                    type: "MESSAGE_UPDATE",
+                                    message: message
+                                });
+                            }
+                        }
+                    }, 100);
+                }
             }
         }
     }
@@ -1001,7 +1235,9 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         }
 
         const isEncryptedVid = isEncryptedVideoMessage(messageContent);
-        setIsEncrypted(isEncryptedMsg || isEncryptedImg || isEncryptedVid || hasEncryptedAttachment);
+        const isEncryptedAud = isEncryptedAudioMessage(messageContent);
+        const isEncryptedFile = isEncryptedFileMessage(messageContent);
+        setIsEncrypted(isEncryptedMsg || isEncryptedImg || isEncryptedVid || isEncryptedAud || isEncryptedFile || hasEncryptedAttachment);
 
         // Handle encrypted image messages
         if (isEncryptedImg && !DecryptedImages.has(message.id)) {
@@ -1059,6 +1295,62 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             }
         }
 
+        // Handle encrypted audio messages
+        if (isEncryptedAud && !DecryptedAudio.has(message.id)) {
+            const allPhrases = [
+                settings.store.secretPhrase,
+                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+            ].filter(Boolean);
+
+            if (allPhrases.length > 0) {
+                // Try to decrypt the audio with all available phrases
+                (async () => {
+                    for (const phrase of allPhrases) {
+                        const result = await decryptAudioMessage(messageContent, phrase);
+                        if (result.success && result.audioData) {
+                            DecryptedAudio.set(message.id, result.audioData);
+                            // Force re-render
+                            FluxDispatcher.dispatch({
+                                type: "MESSAGE_UPDATE",
+                                message: message
+                            });
+                            break;
+                        }
+                    }
+                })().catch(error => {
+                    console.error("Auto-decryption failed for audio message:", message.id, error);
+                });
+            }
+        }
+
+        // Handle encrypted file messages
+        if (isEncryptedFile && !DecryptedFiles.has(message.id)) {
+            const allPhrases = [
+                settings.store.secretPhrase,
+                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+            ].filter(Boolean);
+
+            if (allPhrases.length > 0) {
+                // Try to decrypt the file with all available phrases
+                (async () => {
+                    for (const phrase of allPhrases) {
+                        const result = await decryptFileMessage(messageContent, phrase);
+                        if (result.success && result.fileData) {
+                            DecryptedFiles.set(message.id, result.fileData);
+                            // Force re-render
+                            FluxDispatcher.dispatch({
+                                type: "MESSAGE_UPDATE",
+                                message: message
+                            });
+                            break;
+                        }
+                    }
+                })().catch(error => {
+                    console.error("Auto-decryption failed for file message:", message.id, error);
+                });
+            }
+        }
+
         // Check if already decrypted
         const existingDecryption = DecryptedMessages.get(message.id);
         if (existingDecryption?.success) {
@@ -1108,22 +1400,26 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         }
     }, [message.id, message.content]);
 
-    // Check for decrypted messages, images, and videos
+    // Check for decrypted messages, images, videos, audio, and files
     const decryptedResult = DecryptedMessages.get(message.id);
     const decryptedImage = DecryptedImages.get(message.id);
     const decryptedVideo = DecryptedVideos.get(message.id);
+    const decryptedAudio = DecryptedAudio.get(message.id);
+    const decryptedFile = DecryptedFiles.get(message.id);
 
     // Check if any attachments for this message have been decrypted
     const hasDecryptedAttachments = Array.from(DecryptedImages.keys()).some(key => key.startsWith(`${message.id}-`));
     const hasDecryptedVideoAttachments = Array.from(DecryptedVideos.keys()).some(key => key.startsWith(`${message.id}-`));
+    const hasDecryptedAudioAttachments = Array.from(DecryptedAudio.keys()).some(key => key.startsWith(`${message.id}-`));
+    const hasDecryptedFileAttachments = Array.from(DecryptedFiles.keys()).some(key => key.startsWith(`${message.id}-`));
 
     // Don't show decrypted attachments in accessory - always use Discord's native viewer via attachment replacement
     const decryptedAttachments: ImageEncryptionData[] = [];
 
-    if (decryptedResult?.success || decryptedImage || decryptedVideo || hasDecryptedAttachments || hasDecryptedVideoAttachments || decryptedAttachments.length > 0) {
+    if (decryptedResult?.success || decryptedImage || decryptedVideo || decryptedAudio || decryptedFile || hasDecryptedAttachments || hasDecryptedVideoAttachments || hasDecryptedAudioAttachments || hasDecryptedFileAttachments || decryptedAttachments.length > 0) {
         return (
             <div className={cl("encryption-accessories")}>
-                {(decryptedResult?.success || hasDecryptedAttachments || hasDecryptedVideoAttachments) && (
+                {(decryptedResult?.success || hasDecryptedAttachments || hasDecryptedVideoAttachments || hasDecryptedAudioAttachments || hasDecryptedFileAttachments) && (
                     <div className={cl("profile-lock-indicator")}>
                         <EncryptionIcon width={12} height={12} className={cl("profile-lock-icon")} />
                     </div>
@@ -1153,6 +1449,57 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                         <div className={cl("video-info")}>
                             <EncryptionIcon width={12} height={12} className={cl("video-lock-icon")} />
                             {" "}{decryptedVideo.filename}
+                        </div>
+                    </div>
+                )}
+                {decryptedAudio && (
+                    <div className={cl("decrypted-audio-container")}>
+                        <audio
+                            src={`data:${decryptedAudio.mimeType};base64,${decryptedAudio.audioData}`}
+                            className={cl("decrypted-audio")}
+                            controls
+                            style={{ width: '100%', maxWidth: '400px' }}
+                        />
+                        <div className={cl("audio-info")}>
+                            <EncryptionIcon width={12} height={12} className={cl("audio-lock-icon")} />
+                            {" "}{decryptedAudio.filename}
+                            {decryptedAudio.duration && (
+                                <span className={cl("audio-duration")}> ({Math.round(decryptedAudio.duration)}s)</span>
+                            )}
+                        </div>
+                    </div>
+                )}
+                {decryptedFile && (
+                    <div className={cl("decrypted-file-container")}>
+                        <div className={cl("file-attachment")}>
+                            <div className={cl("file-icon")}>📄</div>
+                            <div className={cl("file-details")}>
+                                <div className={cl("file-name")}>
+                                    <EncryptionIcon width={12} height={12} className={cl("file-lock-icon")} />
+                                    {" "}{decryptedFile.filename}
+                                </div>
+                                <div className={cl("file-size")}>
+                                    {(decryptedFile.size / 1024).toFixed(1)} KB
+                                </div>
+                            </div>
+                            <button
+                                className={cl("file-download-button")}
+                                onClick={() => {
+                                    // Create download link
+                                    const blob = new Blob([new Uint8Array(atob(decryptedFile.fileData).split('').map(c => c.charCodeAt(0)))], { type: decryptedFile.mimeType });
+                                    const url = URL.createObjectURL(blob);
+                                    const link = document.createElement('a');
+                                    link.href = url;
+                                    link.download = decryptedFile.filename;
+                                    link.style.display = 'none';
+                                    document.body.appendChild(link);
+                                    link.click();
+                                    document.body.removeChild(link);
+                                    URL.revokeObjectURL(url);
+                                }}
+                            >
+                                💾 Download
+                            </button>
                         </div>
                     </div>
                 )}
