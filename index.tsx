@@ -566,7 +566,10 @@ export default definePlugin({
 
     renderMessageAccessory: props => <EncryptionAccessory message={props.message} />,
 
-    renderChatBarButton: EncryptionChatBarIcon,
+    chatBarButton: {
+        icon: EncryptionIcon,
+        render: EncryptionChatBarIcon
+    },
 
     // Runtime interception setup
     originalAddFiles: null as any,
@@ -1349,54 +1352,57 @@ export default definePlugin({
         }, 1000);
     },
 
-    renderMessagePopoverButton(message: Message) {
-        const content = getMessageContent(message);
-        if (!content) return null;
+    messagePopoverButton: {
+        icon: EncryptionIcon,
+        render(message: Message) {
+            const content = getMessageContent(message);
+            if (!content) return null;
 
-        return {
-            label: "Decrypt",
-            icon: EncryptionIcon,
-            message,
-            channel: ChannelStore.getChannel(message.channel_id),
-            onClick: async () => {
-                let contentToDecrypt = content;
+            return {
+                label: "Decrypt",
+                icon: EncryptionIcon,
+                message,
+                channel: ChannelStore.getChannel(message.channel_id),
+                onClick: async () => {
+                    let contentToDecrypt = content;
 
-                // Check if this is a hidden message first
-                if (isHiddenMessage(content)) {
-                    const extractedEncrypted = extractHiddenMessage(content);
-                    if (extractedEncrypted) {
-                        contentToDecrypt = extractedEncrypted;
-                    }
-                }
-
-                if (isEncryptedMessage(contentToDecrypt)) {
-                    // Try auto-decryption first
-                    const allPhrases = [
-                        settings.store.secretPhrase,
-                        ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-                    ].filter(Boolean);
-
-                    if (allPhrases.length > 0) {
-                        const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
-                        if (result.success) {
-                            handleDecryption(message.id, result);
-                            return;
+                    // Check if this is a hidden message first
+                    if (isHiddenMessage(content)) {
+                        const extractedEncrypted = extractHiddenMessage(content);
+                        if (extractedEncrypted) {
+                            contentToDecrypt = extractedEncrypted;
                         }
                     }
-                }
 
-                // Show manual decryption modal
-                openModal(props => (
-                    <DecryptionModal
-                        rootProps={props}
-                        encryptedContent={contentToDecrypt}
-                        onSuccess={(decryptedText, usedPhrase) => {
-                            handleDecryption(message.id, { text: decryptedText, success: true });
-                        }}
-                    />
-                ));
-            }
-        };
+                    if (isEncryptedMessage(contentToDecrypt)) {
+                        // Try auto-decryption first
+                        const allPhrases = [
+                            settings.store.secretPhrase,
+                            ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
+                        ].filter(Boolean);
+
+                        if (allPhrases.length > 0) {
+                            const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
+                            if (result.success) {
+                                handleDecryption(message.id, result);
+                                return;
+                            }
+                        }
+                    }
+
+                    // Show manual decryption modal
+                    openModal(props => (
+                        <DecryptionModal
+                            rootProps={props}
+                            encryptedContent={contentToDecrypt}
+                            onSuccess={(decryptedText, usedPhrase) => {
+                                handleDecryption(message.id, { text: decryptedText, success: true });
+                            }}
+                        />
+                    ));
+                }
+            };
+        }
     },
 
     async onBeforeMessageSend(_, message) {

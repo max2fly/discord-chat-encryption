@@ -1,0 +1,12 @@
+.blackignore
+.flake8
+CLAUDE.md
+/.claude/
+/reference/
+/temp/
+
+.flake8
+.blackignore
+docs/
+.idea/
+tests/
