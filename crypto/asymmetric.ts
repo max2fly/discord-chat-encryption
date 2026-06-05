@@ -52,9 +52,13 @@ async function kekFrom(privateKey: CryptoKey, publicKey: CryptoKey): Promise<Cry
 }
 
 export async function sealTo(plaintext: string, recipients: PublicBundle[], signerEcdsaJwk?: JsonWebKey): Promise<SealedPayload> {
+    return sealToBytes(utf8Encode(plaintext), recipients, signerEcdsaJwk);
+}
+
+export async function sealToBytes(plaintext: Uint8Array, recipients: PublicBundle[], signerEcdsaJwk?: JsonWebKey): Promise<SealedPayload> {
     const contentKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, contentKey, utf8Encode(plaintext)));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, contentKey, plaintext));
 
     const eph = await crypto.subtle.generateKey(EC, true, ["deriveBits"]);
     const ephPublicRaw = await rawOf(eph.publicKey);
@@ -74,13 +78,17 @@ export async function sealTo(plaintext: string, recipients: PublicBundle[], sign
 }
 
 export async function openSealed(payload: SealedPayload, myFingerprint: string, myEcdhPrivateJwk: JsonWebKey): Promise<string> {
+    return utf8Decode(await openSealedBytes(payload, myFingerprint, myEcdhPrivateJwk));
+}
+
+export async function openSealedBytes(payload: SealedPayload, myFingerprint: string, myEcdhPrivateJwk: JsonWebKey): Promise<Uint8Array> {
     const mine = payload.wraps.find(w => w.fp === myFingerprint);
     if (!mine) throw new Error("not a recipient");
     const kek = await kekFrom(await importEcdhPrivate(myEcdhPrivateJwk), await importEcdhPublic(payload.ephPublicRaw));
     const ckRaw = await crypto.subtle.decrypt({ name: "AES-GCM", iv: mine.wrapIv }, kek, mine.wrap);
     const contentKey = await crypto.subtle.importKey("raw", ckRaw, "AES-GCM", false, ["decrypt"]);
     const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: payload.iv }, contentKey, payload.ct);
-    return utf8Decode(new Uint8Array(pt));
+    return new Uint8Array(pt);
 }
 
 export async function signBytes(data: Uint8Array, ecdsaPrivateJwk: JsonWebKey): Promise<Uint8Array> {

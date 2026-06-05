@@ -28,6 +28,11 @@ export const settings = definePluginSettings({
         default: false,
         hidden: true,
     },
+    recreateEmbeds: {
+        type: OptionType.BOOLEAN,
+        description: "Recreate media embeds (Tenor/Giphy/image/video links) in decrypted messages. PRIVACY: your client fetches the linked media and the Tenor/Giphy APIs directly, revealing to those hosts that you viewed the link. Turn off to keep links as plain text.",
+        default: true,
+    },
     managePgp: {
         type: OptionType.COMPONENT,
         component: () => <PgpSettings />,

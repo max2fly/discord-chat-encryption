@@ -11,8 +11,10 @@ import { imageSize } from "./crypto/imagesize";
 import { KeyTransfer, parseKeyTransfer } from "./crypto/keytransfer";
 import { trialDecode } from "./crypto/stealth";
 import { detectWire } from "./crypto/stego";
+import { cachedEmbed, findMediaUrls, resolveEmbed } from "./embeds";
 import { EncryptionIcon } from "./EncryptionIcon";
 import { GuildKeyPicker } from "./GuildKeyPicker";
+import { settings } from "./settings";
 import { getContextKeys, getForgottenAt, getIdentity, getPeer, getSelfId, pinPeer, subscribe } from "./store";
 import { cl, EncryptionResult, ImageEncryptionData, VideoEncryptionData } from "./utils";
 
@@ -85,10 +87,14 @@ function buildSyntheticAttachment(attachment: any, dec: { url: string; mime: str
     if (isImage) {
         s.width = dec.width || 400;
         s.height = dec.height || 300;
-        // Unsupported image format (e.g. bmp) → claim image/png so Discord renders an <img>; the browser
-        // decodes the real format from the data: URL. (A format the browser can't decode would show a
-        // broken image rather than empty — still better, and rare.)
-        if (!DISCORD_NATIVE_IMG.has(dec.mime.toLowerCase())) s.content_type = "image/png";
+        // Unsupported image format (e.g. bmp): make the attachment look EXACTLY like a png to Discord —
+        // both content_type AND a .png filename (Discord's mosaic also gates on the extension) — so it
+        // builds an <img>. The data: URL still carries the real format, which the browser decodes. The
+        // download keeps the REAL name (the click handler reads it from DecryptedAttachments, not here).
+        if (!DISCORD_NATIVE_IMG.has(dec.mime.toLowerCase())) {
+            s.content_type = "image/png";
+            s.filename = dec.name.replace(/\.[^.]+$/, "") + ".png";
+        }
     } else if (isVideo) {
         s.width = dec.width || 640;
         s.height = dec.height || 360;
@@ -119,6 +125,43 @@ const ProbingAttachments = new Set<string>(); // attachment ids with an in-fligh
 const DecryptedTextAttachments = new Set<string>();
 
 /**
+ * Render-time media-embed injection — the renderEmbeds-patch sibling of mapAttachmentsForRender.
+ * Encrypted messages carry no server embed, so a Tenor/Giphy/direct media link renders as plain text.
+ * For a message we've decrypted (looked up in DecryptedMessages), recreate the embeds and append them to
+ * the embeds array AT RENDER TIME (mutating message.embeds doesn't stick — renderEmbeds destructures the
+ * array early, same as renderAttachments). Uncached URLs resolve in the background and dispatch a re-render.
+ */
+export function mapEmbedsForRender(message: any, embeds: any[]): any[] {
+    const all = embeds || [];
+    if (!settings.store.recreateEmbeds) return all.filter(e => !e?.__ceSynth); // disabled → strip ours, never inject/fetch
+    const dec = DecryptedMessages.get(message?.id);
+    if (!dec?.success || !dec.text) return all;
+    // The patch reassigns message.embeds every render, so `all` already holds the embeds WE injected last
+    // render. Strip them (marked __ceSynth) and re-derive from the REAL server embeds — otherwise the array
+    // grows every render and the growth keeps re-triggering renders (runaway).
+    const server = all.filter(e => !e?.__ceSynth);
+    const urls = findMediaUrls(dec.text);
+    if (!urls.length) return server;
+
+    const synth: any[] = [];
+    for (const url of urls) {
+        // Don't duplicate an embed Discord already generated for this URL — it sometimes does, especially
+        // after a page refresh, which is the "doubled Tenor embed". Match against the real server embeds.
+        if (server.some(e => e?.url === url)) continue;
+        const e = cachedEmbed(url);
+        if (e) { e.__ceSynth = true; synth.push(e); } // reuse the cached object (stable ref), marked for the strip above
+        else if (e === undefined) {
+            // Not yet resolved — look it up; a successful resolve re-renders (renderEmbeds re-runs and
+            // finds it cached). resolveEmbed caches null on failure so we don't retry.
+            resolveEmbed(url)
+                .then(r => { if (r) FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message }); })
+                .catch(() => { /* degrade to plain link */ });
+        }
+    }
+    return synth.length ? [...server, ...synth] : server;
+}
+
+/**
  * Probe one image attachment: download the cdn ORIGINAL (attachment.url, never proxy_url —
  * media.discordapp.net re-encodes and would destroy the private chunk), try openAttachment with
  * the context keys, and on success swap in a synthetic attachment + re-render. Over-cap text
@@ -132,14 +175,23 @@ async function tryDecryptAttachment(message: Message, attachment: any): Promise<
 
     const channel = ChannelStore.getChannel(message.channel_id);
     if (!channel) return;
-    const symKeys = await getContextKeys(getContext(channel, getSelfId()));
-    if (symKeys.length === 0) return; // no key for this context → leave Discord's native rendering
+    const ctx = getContext(channel, getSelfId());
+    const symKeys = await getContextKeys(ctx);
+    const identity = getIdentity();
+    // Proceed when we have a symmetric key (guild/group) OR this is a 1:1 DM with a pinned peer and our
+    // identity (sealed-box covers carry no symmetric key, so the symKeys.length gate would skip them).
+    const canDm = ctx.type === "dm" && !!identity && !!getPeer(ctx.id);
+    if (symKeys.length === 0 && !canDm) return; // nothing to try → leave Discord's native rendering
 
     ProbingAttachments.add(id);
     try {
         const res = await fetch(attachment.url); // cdn ORIGINAL — byte-exact, keeps the chunk
         const png = new Uint8Array(await res.arrayBuffer());
-        const r = await openAttachment(png, symKeys);
+        const r = await openAttachment(
+            png,
+            symKeys,
+            identity ? { fingerprint: identity.fingerprint, ecdhPrivateJwk: identity.ecdhPrivateJwk } : null
+        );
 
         if (!r) {
             // Tested, nothing decrypted → it's a normal image. Cache so we never re-download it.

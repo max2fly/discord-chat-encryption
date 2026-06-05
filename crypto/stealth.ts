@@ -1,7 +1,7 @@
-import { deserializeSealed, fingerprintOf, openSealed } from "./asymmetric";
+import { deserializeSealed, fingerprintOf, openSealedBytes, sealToBytes, serializeSealed } from "./asymmetric";
 import { packBundle, unpackBundle } from "./codec";
 import { CT_FILE, CT_TEXT, frameSym, packInner, unframeSym, unpackFileBody, unpackInner } from "./envelope";
-import { utf8Decode } from "./encoding";
+import { utf8Decode, utf8Encode } from "./encoding";
 import { decryptSymBytes, encryptSymBytes } from "./symmetric";
 import { PublicBundle } from "./types";
 
@@ -34,6 +34,18 @@ export async function buildKeyAnnounceWire(bundle: PublicBundle): Promise<Uint8A
     return packBundle(bundle);
 }
 
+/** Build the sealed-box (PGP/ECDH) wire bytes: seal packInner(contentType, body) to recipients →
+ *  serialize. Shares one inner-envelope decode path with the symmetric wire, so sealed DM text AND
+ *  files come back through the same interpretInner branch in trialDecode. */
+export async function buildSealedWire(
+    contentType: number,
+    body: Uint8Array,
+    recipients: PublicBundle[],
+    signerEcdsaJwk: JsonWebKey,
+): Promise<Uint8Array> {
+    return utf8Encode(serializeSealed(await sealToBytes(packInner(contentType, body), recipients, signerEcdsaJwk)));
+}
+
 function interpretInner(contentType: number, body: Uint8Array): TrialResult {
     if (contentType === CT_TEXT) return { kind: "text", text: utf8Decode(body) };
     if (contentType === CT_FILE) {
@@ -62,10 +74,14 @@ export async function trialDecode(bytes: Uint8Array, opts: TrialOpts): Promise<T
     if (opts.identity) {
         try {
             const sealed = deserializeSealed(utf8Decode(bytes));
-            const text = await openSealed(sealed, opts.identity.fingerprint, opts.identity.ecdhPrivateJwk);
-            return { kind: "text", text };
+            const plain = await openSealedBytes(sealed, opts.identity.fingerprint, opts.identity.ecdhPrivateJwk);
+            const inner = unpackInner(plain);
+            if (inner) {
+                const r = interpretInner(inner.contentType, inner.body);
+                if (r) return r;
+            }
         } catch {
-            /* not a sealed msg for us */
+            /* not a sealed msg for us / wrong key */
         }
     }
     const b = unpackBundle(bytes);

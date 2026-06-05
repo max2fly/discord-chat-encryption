@@ -10,14 +10,14 @@ import { ChannelRouter, ChannelStore, GuildStore, Menu, SelectedChannelStore, To
 import { findByPropsLazy } from "@webpack";
 
 import { publicBundle, sealTo, serializeSealed } from "./crypto/asymmetric";
-import { sealAttachment } from "./crypto/attachment";
+import { sealAttachment, sealAttachmentSealed } from "./crypto/attachment";
 import { unpackBundle } from "./crypto/codec";
 import { contextKey, getContext } from "./crypto/context";
 import { makeCoverPng } from "./crypto/cover";
 import { utf8Encode } from "./crypto/encoding";
 import { CT_TEXT } from "./crypto/envelope";
 import { embedPrivateChunk } from "./crypto/imagecarrier";
-import { buildKeyAnnounceWire, buildSymWire, trialDecode } from "./crypto/stealth";
+import { buildKeyAnnounceWire, buildSealedWire, buildSymWire, trialDecode } from "./crypto/stealth";
 import { detectWire, wrapWire } from "./crypto/stego";
 import { buildKeyTransfer } from "./crypto/keytransfer";
 import { splitMentions } from "./crypto/symmetric";
@@ -31,7 +31,7 @@ import { ensureIdentity, forcePinPeer, getChannelAutoEncrypt, getContextKeys, ge
 import { settings } from "./settings";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { getRandomWords } from "./utils";
-import { cleanupLegacyCache, decryptedNameForUrl, mapAttachmentsForRender } from "./EncryptionAccessory";
+import { cleanupLegacyCache, decryptedNameForUrl, mapAttachmentsForRender, mapEmbedsForRender } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
 const UploadStore = findByPropsLazy("getUploads", "upload");
@@ -114,13 +114,16 @@ function isAudioFile(fileItem: any): boolean {
     return actualFile.type.startsWith('audio/');
 }
 
-// Attachments encrypt only when the active context has auto-encrypt on and a key set
+// Attachments encrypt only when the active context has auto-encrypt on and the means to encrypt:
+// a symmetric password (guild/group DM) or — for a 1:1 DM — our identity plus the peer's pinned key.
 function shouldEncryptAttachments(): boolean {
     const channelId = SelectedChannelStore.getChannelId();
     const channel = channelId && ChannelStore.getChannel(channelId);
     if (!channel) return false;
     const ctx = getContext(channel, getSelfId());
-    return getChannelAutoEncrypt(channelId) && getCurrentPassword(ctx) != null;
+    if (!getChannelAutoEncrypt(channelId)) return false;
+    if (ctx.type === "dm") return getIdentity() != null && getPeer(ctx.id) != null;
+    return getCurrentPassword(ctx) != null;
 }
 
 // Seal an uploaded file into a cover PNG (raw binary in a private PNG chunk). Any input type →
@@ -130,6 +133,16 @@ async function createEncryptedFile(originalFile: File): Promise<File> {
     const channel = channelId && ChannelStore.getChannel(channelId);
     if (!channel) return originalFile;
     const ctx = getContext(channel, getSelfId());
+
+    // 1:1 DM → sealed-box (PGP/ECDH) cover, addressed to us + the pinned peer.
+    if (ctx.type === "dm") {
+        const id = getIdentity();
+        const peer = getPeer(ctx.id);
+        if (!id || !peer) return originalFile;    // identity or peer key missing → pass through
+        return sealAttachmentSealed(originalFile, [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk);
+    }
+
+    // Guild / group DM → symmetric cover.
     const current = await getCurrentKey(ctx);
     if (!current) return originalFile;            // no symmetric key for this context → pass through
     return sealAttachment(originalFile, current.key, contextKey(ctx)); // → IMG_*.png cover
@@ -851,10 +864,20 @@ export default definePlugin({
             // patch). Render-time → nothing to revert: every re-render re-runs mapAttachments, so the cover
             // is replaced afresh each time and there's no store mutation/MESSAGE_UPDATE re-swap loop.
             find: "}renderStickersAccessories(",
-            replacement: {
-                match: /renderAttachments\(\i\){.+?{attachments:(\i).+?;/,
-                replace: (m, attachments) => `${m}${attachments}=$self.mapAttachments(${attachments});`
-            }
+            replacement: [
+                {
+                    match: /renderAttachments\(\i\){.+?{attachments:(\i).+?;/,
+                    replace: (m, attachments) => `${m}${attachments}=$self.mapAttachments(${attachments});`
+                },
+                {
+                    // Inject our client-recreated media embeds (Tenor/Giphy/direct) for decrypted
+                    // messages at the START of renderEmbeds — reassign the message's embeds BEFORE any
+                    // length-check/early-return or the .map, so an encrypted message (0 server embeds)
+                    // still gets our synthesized ones. The param IS the message (fakeNitro treats it so).
+                    match: /renderEmbeds\((\i)\){/,
+                    replace: (m, msg) => `${m}${msg}.embeds=$self.mapEmbeds(${msg}.embeds,${msg});`
+                }
+            ]
         }
     ],
 
@@ -872,6 +895,10 @@ export default definePlugin({
     // (decrypted url/mime/name/dims) at render time. Returns the input untouched on any failure.
     mapAttachments(attachments: any[]) {
         try { return mapAttachmentsForRender(attachments); } catch { return attachments; }
+    },
+
+    mapEmbeds(embeds: any[], message: any) {
+        try { return mapEmbedsForRender(message, embeds); } catch { return embeds; }
     },
 
     chatBarButton: {
@@ -1423,8 +1450,7 @@ export default definePlugin({
             if (!id) return; // identity not ready yet — send plaintext rather than break
             if (!peer) { await publishKeyIfNeeded(channelId); return; } // can't encrypt without their key
 
-            const sealed = await sealTo(text, [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk);
-            await emit(utf8Encode(serializeSealed(sealed)));
+            await emit(await buildSealedWire(CT_TEXT, utf8Encode(text), [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk));
             return;
         }
 
