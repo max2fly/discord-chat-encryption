@@ -1141,6 +1141,16 @@ export default definePlugin({
         this.downloadClickHandler = (event: MouseEvent) => {
             const anchor = (event.target as HTMLElement)?.closest?.("a[href]") as HTMLAnchorElement | null;
             if (!anchor) return;
+            // Skip our own directDownload() anchor (it has a `download` attr; Discord's broken ones don't)
+            // so the synthetic click isn't re-intercepted → infinite recursion → stack overflow.
+            if (anchor.hasAttribute("download")) return;
+            // Act ONLY on genuine download controls: the hover "Download" button or a file's name link.
+            // NOT the image's zoom/originalLink anchor (aria-hidden, same data: href) or the media itself —
+            // those must keep opening the lightbox / playing.
+            const isDownloadBtn = anchor.getAttribute("aria-label") === "Download"
+                || !!anchor.querySelector?.("[class*='downloadHoverButton']");
+            const isFilenameLink = /fileNameLink/.test(anchor.className || "");
+            if (!isDownloadBtn && !isFilenameLink) return;
             const href = anchor.getAttribute("href") || "";
             if (!href.startsWith("blob:") && !href.startsWith("data:")) return;
             const name = decryptedNameForUrl(href);

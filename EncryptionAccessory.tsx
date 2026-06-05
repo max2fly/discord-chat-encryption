@@ -403,8 +403,10 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
     if (message.attachments?.length) {
         for (const attachment of message.attachments) {
             if (!DecryptedAttachments.has(attachment.id)) continue;
-            if (attachment.url?.startsWith("blob:")) {
+            if (attachment.url?.startsWith("blob:") || attachment.url?.startsWith("data:")) {
                 // Swap stuck — clear throttle so a genuine future revert gets the full retry budget.
+                // Images use a data: URL, video/audio/files a blob: URL — both mean "already swapped";
+                // checking only blob: let images burn the retry budget on no-op re-swaps → a 10s cover flash.
                 ReswapState.delete(attachment.id);
                 continue;
             }
