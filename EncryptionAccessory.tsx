@@ -70,22 +70,53 @@ export function decryptedNameForUrl(url: string): string | undefined {
     for (const v of DecryptedAttachments.values()) if (v.url === url) return v.name;
     return undefined;
 }
+
+/** Build the synthetic attachment that replaces a cover attachment at render time: decrypted url/mime/
+ *  name/size, with sensible dimensions per media kind (and image fields stripped for non-visual files so
+ *  Discord renders a download card instead of an empty mosaic tile). */
+// Image content-types Discord renders inline. Anything else (bmp, tiff, …) gets an empty mosaic tile
+// unless we claim a supported type so Discord builds an <img> — the data: URL still carries the real format.
+const DISCORD_NATIVE_IMG = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/avif"]);
+
+function buildSyntheticAttachment(attachment: any, dec: { url: string; mime: string; name: string; size: number; width?: number; height?: number; }): any {
+    const isImage = dec.mime.startsWith("image/");
+    const isVideo = dec.mime.startsWith("video/");
+    const s: any = { ...attachment, filename: dec.name, content_type: dec.mime, url: dec.url, proxy_url: dec.url, size: dec.size };
+    if (isImage) {
+        s.width = dec.width || 400;
+        s.height = dec.height || 300;
+        // Unsupported image format (e.g. bmp) → claim image/png so Discord renders an <img>; the browser
+        // decodes the real format from the data: URL. (A format the browser can't decode would show a
+        // broken image rather than empty — still better, and rare.)
+        if (!DISCORD_NATIVE_IMG.has(dec.mime.toLowerCase())) s.content_type = "image/png";
+    } else if (isVideo) {
+        s.width = dec.width || 640;
+        s.height = dec.height || 360;
+    } else {
+        delete s.width; delete s.height; delete s.placeholder; delete s.placeholder_version;
+    }
+    return s;
+}
+
+/** Render-time substitution for the renderAttachments patch: replace any attachment we've decrypted
+ *  with its synthetic (decrypted url/mime/name/dims). Returns the SAME array if nothing changed. */
+export function mapAttachmentsForRender(attachments: any[]): any[] {
+    if (!attachments?.length) return attachments;
+    let changed = false;
+    const out = attachments.map(att => {
+        const dec = DecryptedAttachments.get(att?.id);
+        if (!dec) return att;
+        changed = true;
+        return buildSyntheticAttachment(att, dec);
+    });
+    return changed ? out : attachments;
+}
 const ProbingAttachments = new Set<string>(); // attachment ids with an in-flight probe (dedupe)
 // Over-cap-text cover PNGs ({ kind: "text" }): handled once via handleDecryption (which mutates
 // message.content and re-fires the decrypt effect). Marked seen so we never re-fetch + re-decrypt the
 // same cover every render — there's no synthetic-attachment swap for these, so the live attachment.url
 // stays the cdn url forever and would otherwise keep failing the DecryptedAttachments/NotOurs guards.
 const DecryptedTextAttachments = new Set<string>();
-
-// Per-render safety-net throttle. The net re-applies a synthetic swap when Discord reverts an
-// attachment's url to the cdn after a re-render. Each swap dispatches MESSAGE_UPDATE (→ re-render),
-// so an unthrottled net fires every ~100ms forever if Discord keeps reverting. We debounce per
-// attachment and cap consecutive failed re-swaps; the state self-clears once the swap sticks (the
-// attachment then has a blob url, so the net is skipped and the entry is reset).
-const ReswapState = new Map<string, { last: number; misses: number; }>(); // attachmentId -> throttle state
-const RESWAP_DEBOUNCE_MS = 1000;  // at most one re-swap attempt per attachment per second
-const RESWAP_MAX_MISSES = 5;      // give up after this many failures within one revert episode
-const RESWAP_EPISODE_MS = 10_000; // a gap this long since the last attempt = a fresh episode → reset misses
 
 /**
  * Probe one image attachment: download the cdn ORIGINAL (attachment.url, never proxy_url —
@@ -138,7 +169,8 @@ async function tryDecryptAttachment(message: Message, attachment: any): Promise<
             : URL.createObjectURL(new Blob([r.data], { type: r.mime }));
         const dim = isImg ? imageSize(r.data) : null; // size the layout from the REAL image, not the cover
         DecryptedAttachments.set(id, { url, mime: r.mime, name: r.name, size: r.data.length, width: dim?.width, height: dim?.height });
-        swapDecryptedAttachment(message, id);
+        // DecryptedAttachments is now populated; re-render so the renderAttachments patch substitutes it.
+        FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message });
         if (r.mime.startsWith("video/")) readVideoDimensions(message, id, url); // video size isn't in a cheap header
     } catch {
         // Network/parse error: treat as a normal image so we don't hammer the cdn on every render.
@@ -157,66 +189,14 @@ function readVideoDimensions(message: Message, attachmentId: string, url: string
     v.onloadedmetadata = () => {
         if (!v.videoWidth || !v.videoHeight) return;
         const cur = DecryptedAttachments.get(attachmentId);
-        if (cur) DecryptedAttachments.set(attachmentId, { ...cur, width: v.videoWidth, height: v.videoHeight });
-        const att = message.attachments?.find(a => a.id === attachmentId) as any;
-        if (att) {
-            att.width = v.videoWidth;
-            att.height = v.videoHeight;
-            FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message });
-            const trigger = UpdateTriggers.get(message.id);
-            if (trigger) trigger();
-        }
+        if (!cur) return;
+        DecryptedAttachments.set(attachmentId, { ...cur, width: v.videoWidth, height: v.videoHeight });
+        // Re-render so the patch rebuilds the synthetic attachment with the now-known real dimensions.
+        FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message });
+        const trigger = UpdateTriggers.get(message.id);
+        if (trigger) trigger();
     };
     v.src = url;
-}
-
-/** Replace the live attachment with the decrypted synthetic one and force a native re-render. */
-function swapDecryptedAttachment(message: Message, attachmentId: string): void {
-    const decrypted = DecryptedAttachments.get(attachmentId);
-    if (!decrypted || !message.attachments) return;
-    const idx = message.attachments.findIndex(att => att.id === attachmentId);
-    if (idx === -1) return;
-    const attachment = message.attachments[idx];
-    if (attachment.url === decrypted.url) return; // already swapped
-
-    const isImage = decrypted.mime.startsWith("image/");
-    const isVideo = decrypted.mime.startsWith("video/");
-    const syntheticAttachment: any = {
-        ...attachment,
-        filename: decrypted.name,
-        content_type: decrypted.mime,
-        url: decrypted.url,
-        proxy_url: decrypted.url, // blob URL — Discord renders/downloads it directly, no cdn round-trip
-        size: decrypted.size,     // decrypted byte length, not the (larger) cover-PNG size
-    };
-    // Give media sensible default dimensions so the layout doesn't collapse (Discord overrides
-    // these once the element loads its intrinsic size).
-    if (isImage) {
-        // Use the decrypted image's REAL dimensions — not attachment.width/height, which are the small
-        // cover PNG's size (otherwise Discord lays the full-res image out in a 128×128 box → looks low-res).
-        syntheticAttachment.width = decrypted.width || 400;
-        syntheticAttachment.height = decrypted.height || 300;
-    } else if (isVideo) {
-        // Don't use attachment.width/height (the cover's 128×128). Real size is filled in by
-        // readVideoDimensions once metadata loads; until then a sensible 16:9 default.
-        syntheticAttachment.width = decrypted.width || 640;
-        syntheticAttachment.height = decrypted.height || 360;
-    } else {
-        // Non-visual (audio / exe / pdf / zip / …): the spread carried the cover PNG's image fields
-        // (width/height/placeholder), which make Discord try to render an empty visual mosaic tile.
-        // Strip them so it renders a normal file download card instead. Audio is content_type-driven
-        // and needs no dimensions.
-        delete syntheticAttachment.width;
-        delete syntheticAttachment.height;
-        delete syntheticAttachment.placeholder;
-        delete syntheticAttachment.placeholder_version;
-    }
-
-    message.attachments[idx] = syntheticAttachment;
-
-    FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message });
-    const trigger = UpdateTriggers.get(message.id);
-    if (trigger) trigger();
 }
 
 export function getDecryptedMessages() {
@@ -314,12 +294,13 @@ export async function restoreAllCachedAttachments() {
         }
     }
 
-    // Re-apply decrypted cover-PNG attachments (the live attachment may have reverted to the cdn url
-    // after a re-render). DecryptedAttachments is keyed by attachment id.
+    // Force a re-render of any message that has a cached decrypted cover-PNG attachment so the
+    // renderAttachments patch re-runs and substitutes it. The substitution itself is render-time
+    // (DecryptedAttachments keyed by attachment id) — there's nothing to "re-apply", only to re-render.
     for (const [attachmentId] of DecryptedAttachments.entries()) {
         for (const messageInstance of MessageInstances.values()) {
             if (messageInstance.attachments?.some(att => att.id === attachmentId)) {
-                swapDecryptedAttachment(messageInstance, attachmentId);
+                FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message: messageInstance });
                 restoredAttachments++;
                 break;
             }
@@ -394,32 +375,6 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                 message: message
             });
         }, 100);
-    }
-
-    // Safety net: an already-decrypted cover-PNG attachment whose live attachment reverted to the
-    // cdn url after a re-render — re-apply the synthetic swap (handles race conditions). No re-fetch.
-    // Throttled (debounce + bounded retries) so a persistently-reverting attachment can't trigger a
-    // MESSAGE_UPDATE storm; the throttle resets the moment the swap is observed to have stuck.
-    if (message.attachments?.length) {
-        for (const attachment of message.attachments) {
-            if (!DecryptedAttachments.has(attachment.id)) continue;
-            if (attachment.url?.startsWith("blob:") || attachment.url?.startsWith("data:")) {
-                // Swap stuck — clear throttle so a genuine future revert gets the full retry budget.
-                // Images use a data: URL, video/audio/files a blob: URL — both mean "already swapped";
-                // checking only blob: let images burn the retry budget on no-op re-swaps → a 10s cover flash.
-                ReswapState.delete(attachment.id);
-                continue;
-            }
-            const now = Date.now();
-            const prev = ReswapState.get(attachment.id) ?? { last: 0, misses: 0 };
-            // A long gap since the last try means this is a new revert (e.g. scrolled back to the
-            // message), not a continuous storm — start a fresh retry budget.
-            const misses = now - prev.last > RESWAP_EPISODE_MS ? 0 : prev.misses;
-            if (now - prev.last < RESWAP_DEBOUNCE_MS) continue; // debounce: ≤ 1 attempt/sec/attachment
-            if (misses >= RESWAP_MAX_MISSES) continue;          // Discord keeps reverting → stop hammering
-            ReswapState.set(attachment.id, { last: now, misses: misses + 1 });
-            setTimeout(() => swapDecryptedAttachment(message, attachment.id), 100);
-        }
     }
 
     useEffect(() => {

@@ -31,7 +31,7 @@ import { ensureIdentity, forcePinPeer, getChannelAutoEncrypt, getContextKeys, ge
 import { settings } from "./settings";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { getRandomWords } from "./utils";
-import { cleanupLegacyCache, decryptedNameForUrl } from "./EncryptionAccessory";
+import { cleanupLegacyCache, decryptedNameForUrl, mapAttachmentsForRender } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
 const UploadStore = findByPropsLazy("getUploads", "upload");
@@ -845,7 +845,18 @@ export default definePlugin({
     ],
     settings,
 
-    patches: [],
+    patches: [
+        {
+            // Substitute our decrypted attachment at render time (copied from fakeNitro's filterAttachments
+            // patch). Render-time → nothing to revert: every re-render re-runs mapAttachments, so the cover
+            // is replaced afresh each time and there's no store mutation/MESSAGE_UPDATE re-swap loop.
+            find: "}renderStickersAccessories(",
+            replacement: {
+                match: /renderAttachments\(\i\){.+?{attachments:(\i).+?;/,
+                replace: (m, attachments) => `${m}${attachments}=$self.mapAttachments(${attachments});`
+            }
+        }
+    ],
 
     contextMenus: {
         "message": messageCtxPatch,
@@ -856,6 +867,12 @@ export default definePlugin({
     },
 
     renderMessageAccessory: props => <EncryptionAccessory message={props.message} />,
+
+    // Called by the renderAttachments patch: swap any decrypted cover attachment for its synthetic
+    // (decrypted url/mime/name/dims) at render time. Returns the input untouched on any failure.
+    mapAttachments(attachments: any[]) {
+        try { return mapAttachmentsForRender(attachments); } catch { return attachments; }
+    },
 
     chatBarButton: {
         icon: EncryptionIcon,
