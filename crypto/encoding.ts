@@ -24,3 +24,12 @@ export function fromBase64(b64: string): Uint8Array {
     for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
     return out;
 }
+
+export function toBase64Url(bytes: Uint8Array): string {
+    return toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function fromBase64Url(s: string): Uint8Array {
+    const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+    return fromBase64(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+}

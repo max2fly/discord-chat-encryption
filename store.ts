@@ -218,6 +218,13 @@ export async function getKeyById(ctx: Context, keyId: string): Promise<CryptoKey
     return entry ? keyFor(entry, ck) : null;
 }
 
+/** All cached symmetric keys for a context (current + history) — for stealth trial-decode. */
+export async function getContextKeys(ctx: Context): Promise<{ key: CryptoKey; contextKey: string }[]> {
+    const ck = contextKey(ctx);
+    const rec = getRecord(ck);
+    return Promise.all(rec.keys.map(async e => ({ key: await keyFor(e, ck), contextKey: ck })));
+}
+
 /** Current key entry's raw password for a context (used by the attachment passphrase path), or null. */
 export function getCurrentPassword(ctx: Context): string | null {
     const ck = contextKey(ctx);

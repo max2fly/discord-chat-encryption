@@ -77,4 +77,46 @@ export function decodeKeyAnnounce(raw: string): PublicBundle | null {
         return { ecdhPublicRaw: fromBase64(o.e), ecdsaPublicRaw: fromBase64(o.s), fingerprint: o.f };
     } catch { return null; }
 }
-export function isKeyAnnounce(raw: string): boolean { return /\[PGPKEY:v1:[^\]]+\]/.test(raw); }
+export function isKeyAnnounce(raw: string): boolean {
+    return /\[PGPKEY:v1:[^\]]+\]/.test(raw);
+}
+
+export function packBundle(b: PublicBundle): Uint8Array {
+    const f = utf8Encode(b.fingerprint);
+    const out = new Uint8Array(2 + b.ecdhPublicRaw.length + 2 + b.ecdsaPublicRaw.length + f.length);
+    let o = 0;
+    const w16 = (n: number) => {
+        out[o++] = (n >> 8) & 0xff;
+        out[o++] = n & 0xff;
+    };
+    w16(b.ecdhPublicRaw.length);
+    out.set(b.ecdhPublicRaw, o);
+    o += b.ecdhPublicRaw.length;
+    w16(b.ecdsaPublicRaw.length);
+    out.set(b.ecdsaPublicRaw, o);
+    o += b.ecdsaPublicRaw.length;
+    out.set(f, o);
+    return out;
+}
+
+export function unpackBundle(bytes: Uint8Array): PublicBundle | null {
+    try {
+        let o = 0;
+        const r16 = () => {
+            const v = (bytes[o] << 8) | bytes[o + 1];
+            o += 2;
+            return v;
+        };
+        const el = r16();
+        const ecdh = bytes.subarray(o, o + el);
+        o += el;
+        const sl = r16();
+        const ecdsa = bytes.subarray(o, o + sl);
+        o += sl;
+        if (el <= 0 || sl <= 0 || o > bytes.length) return null;
+        const fingerprint = utf8Decode(bytes.subarray(o));
+        return { ecdhPublicRaw: new Uint8Array(ecdh), ecdsaPublicRaw: new Uint8Array(ecdsa), fingerprint };
+    } catch {
+        return null;
+    }
+}

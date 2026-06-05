@@ -45,6 +45,17 @@ export async function decryptSym(payload: EncPayload, key: CryptoKey, contextKey
     return utf8Decode(new Uint8Array(pt));
 }
 
+export async function encryptSymBytes(plaintext: Uint8Array, key: CryptoKey, contextKey: string): Promise<{ iv: Uint8Array; ct: Uint8Array }> {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf8Encode(contextKey) }, key, plaintext);
+    return { iv, ct: new Uint8Array(ct) };
+}
+
+export async function decryptSymBytes(iv: Uint8Array, ct: Uint8Array, key: CryptoKey, contextKey: string): Promise<Uint8Array> {
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf8Encode(contextKey) }, key, ct);
+    return new Uint8Array(pt);
+}
+
 const MENTION_RE = /<@!?\d+>|<@&\d+>|<#\d+>/g;
 
 /** Pull Discord mentions out so they survive encryption as plaintext (pings still notify). */
