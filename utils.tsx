@@ -87,7 +87,9 @@ function extractMentions(message: string): EncryptionData {
     };
 }
 
-export async function encrypt(message: string, secretPhrase: string): Promise<EncryptionResult> {
+// Internal AES-GCM text helpers — retained only for the attachment encrypt/decrypt paths below.
+// (The message-level global-passphrase API was removed in favour of the per-context system.)
+async function encrypt(message: string, secretPhrase: string): Promise<EncryptionResult> {
     if (!message || !secretPhrase) {
         return { text: message, success: false, error: "Missing message or secret phrase" };
     }
@@ -121,7 +123,7 @@ export async function encrypt(message: string, secretPhrase: string): Promise<En
     }
 }
 
-export async function decrypt(encryptedMessage: string, secretPhrase: string): Promise<EncryptionResult> {
+async function decrypt(encryptedMessage: string, secretPhrase: string): Promise<EncryptionResult> {
     if (!encryptedMessage || !secretPhrase) {
         return { text: encryptedMessage, success: false, error: "Missing message or secret phrase" };
     }
@@ -175,33 +177,6 @@ export async function decrypt(encryptedMessage: string, secretPhrase: string): P
     }
 }
 
-export async function decryptWithMultiplePhrases(encryptedMessage: string, secretPhrases: string[]): Promise<EncryptionResult> {
-    if (!encryptedMessage || !secretPhrases.length) {
-        return { text: encryptedMessage, success: false, error: "Missing message or secret phrases" };
-    }
-
-    // Extract mentions from the full message first
-    const mentionRegex = /<@!?(\d+)>|<@&(\d+)>|<#(\d+)>/g;
-    const mentions: string[] = [];
-    let match;
-    while ((match = mentionRegex.exec(encryptedMessage)) !== null) {
-        mentions.push(match[0]);
-    }
-
-    for (const phrase of secretPhrases) {
-        if (!phrase.trim()) continue;
-
-        const result = await decrypt(encryptedMessage, phrase.trim());
-        if (result.success) {
-            // Append mentions to decrypted text
-            const finalText = mentions.length > 0 ? `${result.text} ${mentions.join(' ')}` : result.text;
-            return { text: finalText, success: true };
-        }
-    }
-
-    return { text: encryptedMessage, success: false, error: "Failed to decrypt with any provided secret phrases" };
-}
-
 function extractEncryptedPart(message: string): string {
     const match = message.match(/\[ENC:v1:[^\]]+\]/);
     return match ? match[0] : message;
@@ -232,17 +207,13 @@ function getRandomWords(count: number): string[] {
 
 function encodeToInvisibleChars(text: string): string {
     let result = '';
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(text);
+    const bytes = new TextEncoder().encode(text);
 
+    // Pack 2 bits per invisible char (4 of the 7 symbols), i.e. 4 chars/byte instead of 8 — halves the
+    // payload length so messages/keys stay under Discord's character cap.
     for (const byte of bytes) {
-        const binary = byte.toString(2).padStart(8, '0');
-        for (const bit of binary) {
-            if (bit === '1') {
-                result += HIDDEN_CHARS[0]; // Use first invisible char for 1
-            } else {
-                result += HIDDEN_CHARS[1]; // Use second invisible char for 0
-            }
+        for (let shift = 6; shift >= 0; shift -= 2) {
+            result += HIDDEN_CHARS[(byte >> shift) & 0b11];
         }
     }
 
@@ -251,27 +222,19 @@ function encodeToInvisibleChars(text: string): string {
 
 function decodeFromInvisibleChars(hiddenText: string): string {
     try {
-        let binaryString = '';
-
+        // Each invisible char carries 2 bits (its index among the first 4 HIDDEN_CHARS); 4 chars = 1 byte.
+        const symbols: number[] = [];
         for (const char of hiddenText) {
-            if (char === HIDDEN_CHARS[0]) {
-                binaryString += '1';
-            } else if (char === HIDDEN_CHARS[1]) {
-                binaryString += '0';
-            }
+            const idx = HIDDEN_CHARS.indexOf(char);
+            if (idx >= 0 && idx < 4) symbols.push(idx);
         }
 
-        // Convert binary to bytes
         const bytes: number[] = [];
-        for (let i = 0; i < binaryString.length; i += 8) {
-            const byte = binaryString.slice(i, i + 8);
-            if (byte.length === 8) {
-                bytes.push(parseInt(byte, 2));
-            }
+        for (let i = 0; i + 4 <= symbols.length; i += 4) {
+            bytes.push((symbols[i] << 6) | (symbols[i + 1] << 4) | (symbols[i + 2] << 2) | symbols[i + 3]);
         }
 
-        const decoder = new TextDecoder();
-        return decoder.decode(new Uint8Array(bytes));
+        return new TextDecoder().decode(new Uint8Array(bytes));
     } catch (error) {
         console.error("Failed to decode invisible chars:", error);
         return "";
@@ -282,13 +245,17 @@ export async function createHiddenMessage(encryptedText: string): Promise<string
     // Generate 3-5 random words for cover text
     const wordCount = 3 + (crypto.getRandomValues(new Uint8Array(1))[0] % 3); // 3-5 words
     const coverWords = getRandomWords(wordCount);
-    const coverText = coverWords.join(' ');
 
     // Encode encrypted text as invisible characters
     const hiddenChars = encodeToInvisibleChars(encryptedText);
 
-    // Combine cover text with hidden message and marker
-    return coverText + hiddenChars + HIDDEN_MESSAGE_MARKER;
+    // Insert the hidden payload + marker BETWEEN two real words — never at the end. Discord trims
+    // trailing invisible/zero-width characters, which would strip the marker and silently destroy
+    // the hidden message. Keeping at least one visible word after the payload prevents that.
+    const splitAt = 1 + (crypto.getRandomValues(new Uint8Array(1))[0] % (coverWords.length - 1)); // 1..len-1
+    const before = coverWords.slice(0, splitAt).join(' ');
+    const after = coverWords.slice(splitAt).join(' ');
+    return `${before} ${hiddenChars}${HIDDEN_MESSAGE_MARKER}${after}`;
 }
 
 export function extractHiddenMessage(message: string): string | null {

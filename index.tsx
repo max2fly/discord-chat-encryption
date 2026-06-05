@@ -2,17 +2,28 @@ import "./styles.css";
 
 import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { Devs } from "@utils/constants";
+import { insertTextIntoChatInputBox, sendMessage } from "@utils/discord";
 import { openModal } from "@utils/modal";
 import definePlugin from "@utils/types";
-import { Message } from "@vencord/discord-types";
-import { ChannelStore, Menu } from "@webpack/common";
+import { Channel, Message, User } from "@vencord/discord-types";
+import { ChannelRouter, ChannelStore, GuildStore, Menu, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
-import { DecryptionModal } from "./DecryptionModal";
-import { EncryptionAccessory, handleDecryption, getDecryptedMessages, getDecryptedImages, getDecryptedVideos, getDecryptedAudio, getDecryptedFiles } from "./EncryptionAccessory";
-import { EncryptionChatBarIcon, EncryptionIcon, setShouldShowEncryptionEnabledTooltip } from "./EncryptionIcon";
+import { publicBundle, sealTo } from "./crypto/asymmetric";
+import { decodeKeyAnnounce, encodeKeyAnnounce, encodeMessage, encodeSealed, isEncoded, isKeyAnnounce, isSealedWire } from "./crypto/codec";
+import { contextKey, getContext } from "./crypto/context";
+import { buildKeyTransfer } from "./crypto/keytransfer";
+import { encryptSym, splitMentions } from "./crypto/symmetric";
+import { Context } from "./crypto/types";
+import { insertMyKeyIntoChat } from "./dmActions";
+import { EncryptionAccessory, decryptForChannel, handleDecryption, getDecryptedMessages, getDecryptedImages, getDecryptedVideos, getDecryptedAudio, getDecryptedFiles } from "./EncryptionAccessory";
+import { EncryptionChatBarIcon, EncryptionIcon } from "./EncryptionIcon";
+import { GuildKeyPicker } from "./GuildKeyPicker";
+import { KeyEntryModal } from "./KeyEntryModal";
+import { ensureIdentity, forcePinPeer, getChannelAutoEncrypt, getCurrentKey, getCurrentPassword, getIdentity, getPeer, getRecord, getSelfId, loadStore } from "./store";
 import { settings } from "./settings";
-import { decryptWithMultiplePhrases, encrypt, isEncryptedMessage, createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage, encryptVideoToMessage, encryptAudioToMessage, encryptFileToMessage } from "./utils";
+import { VaultUnlockModal } from "./VaultUnlockModal";
+import { createHiddenMessage, extractHiddenMessage, isHiddenMessage, encryptImageToMessage, encryptVideoToMessage, encryptAudioToMessage, encryptFileToMessage } from "./utils";
 import { cleanupLegacyCache } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
@@ -67,22 +78,45 @@ function isAudioFile(fileItem: any): boolean {
     return actualFile.type.startsWith('audio/');
 }
 
+// Resolve the active channel's per-context password (uploads happen in the focused channel)
+function getActiveContextPassword(): string | null {
+    const channelId = SelectedChannelStore.getChannelId();
+    const channel = channelId && ChannelStore.getChannel(channelId);
+    if (!channel) return null;
+    return getCurrentPassword(getContext(channel, getSelfId()));
+}
+
+// Attachments encrypt only when the active context has auto-encrypt on and a key set
+function shouldEncryptAttachments(): boolean {
+    const channelId = SelectedChannelStore.getChannelId();
+    const channel = channelId && ChannelStore.getChannel(channelId);
+    if (!channel) return false;
+    const ctx = getContext(channel, getSelfId());
+    return getChannelAutoEncrypt(channelId) && getCurrentPassword(ctx) != null;
+}
+
 // Helper function to create encrypted file replacement
 async function createEncryptedFile(originalFile: File): Promise<File> {
+    const password = getActiveContextPassword();
+    if (!password) {
+        // No key for this context — pass the file through unmodified
+        return originalFile;
+    }
+
     let result;
-    
+
     // Choose encryption method based on file type
     if (originalFile.type.startsWith('image/')) {
-        result = await encryptImageToMessage(originalFile, settings.store.secretPhrase);
+        result = await encryptImageToMessage(originalFile, password);
     } else if (originalFile.type.startsWith('video/')) {
-        result = await encryptVideoToMessage(originalFile, settings.store.secretPhrase);
+        result = await encryptVideoToMessage(originalFile, password);
     } else if (originalFile.type.startsWith('audio/')) {
-        result = await encryptAudioToMessage(originalFile, settings.store.secretPhrase);
+        result = await encryptAudioToMessage(originalFile, password);
     } else {
         // Wildcard catch for any other file type
-        result = await encryptFileToMessage(originalFile, settings.store.secretPhrase);
+        result = await encryptFileToMessage(originalFile, password);
     }
-    
+
     if (!result.success) {
         throw new Error(result.error || "Encryption failed");
     }
@@ -126,35 +160,50 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, props) => {
                                 }
                             }
 
-                            if (isEncryptedMessage(contentToDecrypt)) {
-                                // Try auto-decryption first
-                                const allPhrases = [
-                                    settings.store.secretPhrase,
-                                    ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-                                ].filter(Boolean);
-
-                                if (allPhrases.length > 0) {
-                                    const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
-                                    if (result.success) {
-                                        handleDecryption(message.id, result);
-                                        return;
-                                    }
-                                }
+                            const outcome = await decryptForChannel(message.channel_id, contentToDecrypt);
+                            if (outcome.state === "decrypted") {
+                                handleDecryption(message.id, { text: outcome.text, success: true });
+                            } else if (outcome.state === "no-key") {
+                                Toasts.show({
+                                    message: "No encryption key set for this context.",
+                                    id: Toasts.genId(),
+                                    type: Toasts.Type.FAILURE
+                                });
+                            } else if (outcome.state === "missing-key") {
+                                Toasts.show({
+                                    message: "Encrypted with a key you don't have — ask for the current key.",
+                                    id: Toasts.genId(),
+                                    type: Toasts.Type.MESSAGE
+                                });
                             }
-
-                            // Show manual decryption modal
-                            openModal(modalProps => (
-                                <DecryptionModal
-                                    rootProps={modalProps}
-                                    encryptedContent={contentToDecrypt}
-                                    onSuccess={(decryptedText, usedPhrase) => {
-                                        handleDecryption(message.id, { text: decryptedText, success: true });
-                                    }}
-                                />
-                            ));
                         }}
                     />
                 ));
+
+                // Manual save of a peer's PGP key from a key-announce (recover from accidental erasure /
+                // old keys without asking them to re-share). Deliberate, MITM-accepting — verify first.
+                const keyRaw = isHiddenMessage(content) ? (extractHiddenMessage(content) ?? content) : content;
+                if (isKeyAnnounce(keyRaw)) {
+                    const keyBundle = decodeKeyAnnounce(keyRaw);
+                    const keyAuthor = message.author?.id;
+                    if (keyBundle && keyAuthor && keyAuthor !== getSelfId() && keyBundle.fingerprint !== getIdentity()?.fingerprint) {
+                        group.push(
+                            <Menu.MenuItem
+                                id="vc-save-pgp-key"
+                                label="Save PGP key"
+                                icon={EncryptionIcon}
+                                action={async () => {
+                                    await forcePinPeer(keyAuthor, keyBundle);
+                                    Toasts.show({
+                                        message: `Saved ${(message.author as any)?.username ?? "their"} encryption key — verify the fingerprint.`,
+                                        id: Toasts.genId(),
+                                        type: Toasts.Type.SUCCESS
+                                    });
+                                }}
+                            />
+                        );
+                    }
+                }
             }
         }
     }
@@ -266,6 +315,23 @@ const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => 
     } else {
         console.log("ChatEncryption: Not decrypted media, skipping");
     }
+};
+
+// Guild-header popout: "Manage Encryption Key" → opens the key modal bound to the guild's context
+const guildHeaderCtxPatch: NavContextMenuPatchCallback = (children, { guild }: { guild?: { id: string; }; }) => {
+    if (!guild) return;
+    children.push(
+        <Menu.MenuItem
+            id="vc-chatenc-setkey"
+            label="Manage Encryption Key"
+            icon={EncryptionIcon}
+            action={() =>
+                openModal(props => (
+                    <KeyEntryModal rootProps={props} context={getContext({ id: guild.id, guild_id: guild.id }, getSelfId())} />
+                ))
+            }
+        />
+    );
 };
 
 // Helper function to check if an image URL is from our decrypted cache
@@ -543,8 +609,241 @@ function getMessageContent(message: Message) {
         || message.embeds?.find(embed => embed.type === "auto_moderation_message")?.rawDescription || "";
 }
 
+// Discord's message-length cap (full Nitro raises it to 4000). Used to decide if a stego'd message fits.
+function maxMessageLength(): number {
+    return (UserStore.getCurrentUser() as any)?.premiumType === 2 ? 4000 : 2000;
+}
 
-let tooltipTimeout: any;
+// Stego-wrap `encoded` if enabled AND the result (plus a trailing suffix of `suffixLen`, e.g. mentions)
+// still fits the cap; otherwise fall back to the visible blob and warn. Returns content WITHOUT the suffix.
+async function stegoOrVisible(encoded: string, stego: boolean, suffixLen: number): Promise<string> {
+    if (!stego) return encoded;
+    try {
+        const hidden = await createHiddenMessage(encoded);
+        if (hidden.length + suffixLen <= maxMessageLength()) return hidden;
+        Toasts.show({
+            message: "Message too long to hide — sent as visible encrypted text.",
+            id: Toasts.genId(),
+            type: Toasts.Type.MESSAGE
+        });
+        return encoded;
+    } catch (e) {
+        console.error("ChatEncryption: stego wrap failed, sending visible:", e);
+        return encoded;
+    }
+}
+
+// TOFU handshake: publish our public-key bundle into a DM so the peer can auto-pin it.
+// Returns true if a key was published (caller should abort encrypting this turn).
+async function publishKeyIfNeeded(channelId: string): Promise<boolean> {
+    const channel = ChannelStore.getChannel(channelId);
+    if (!channel) return false;
+
+    const ctx = getContext(channel, getSelfId());
+    if (ctx.type !== "dm") return false;
+    if (getPeer(ctx.id)) return false; // already have the peer's key — nothing to publish
+
+    const id = await ensureIdentity();
+    sendMessage(channelId, { content: encodeKeyAnnounce(publicBundle(id)) });
+    Toasts.show({
+        message: "Shared your encryption key — ask them to do the same to start an encrypted chat.",
+        id: Toasts.genId(),
+        type: Toasts.Type.MESSAGE
+    });
+    return true;
+}
+
+// "Start encrypted chat" — publish our key into the current/target DM unconditionally.
+async function startEncryptedChat(channelId: string) {
+    const channel = ChannelStore.getChannel(channelId);
+    if (!channel) return;
+
+    const ctx = getContext(channel, getSelfId());
+    if (ctx.type !== "dm") {
+        Toasts.show({
+            message: "Encrypted chat handshake is only available in 1:1 DMs.",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    await insertMyKeyIntoChat();
+    Toasts.show({
+        message: "Inserted your encryption key into the message box — review and send it.",
+        id: Toasts.genId(),
+        type: Toasts.Type.SUCCESS
+    });
+}
+
+// Seal a context's current symmetric key to a pinned 1:1 DM peer and post it as a sealed message.
+// `sourceCtx` is the context whose key is being shared (a guild or the group DM itself).
+async function sendServerKey(channelId: string, sourceCtx: Context) {
+    const channel = ChannelStore.getChannel(channelId);
+    if (!channel) return;
+
+    const ctx = getContext(channel, getSelfId());
+    if (ctx.type !== "dm") return;
+
+    const peer = getPeer(ctx.id);
+    const id = getIdentity();
+    if (!peer || !id) {
+        Toasts.show({
+            message: "Set up an encrypted chat with this person first (no pinned key yet).",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    const rec = getRecord(contextKey(sourceCtx));
+    const current = rec.currentKeyId && rec.keys.find(k => k.keyId === rec.currentKeyId);
+    if (!current) {
+        Toasts.show({
+            message: "No key to send for that server.",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    const guild = sourceCtx.type === "guild" ? GuildStore.getGuild(sourceCtx.id) : null;
+    const guildName = guild?.name ?? (sourceCtx.type === "groupdm" ? (channel.name || "Group DM") : sourceCtx.id);
+
+    const text = buildKeyTransfer({
+        guildId: sourceCtx.id,
+        guildName,
+        password: current.password,
+        fromFingerprint: id.fingerprint,
+    });
+    const sealed = await sealTo(text, [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk);
+    const wire = encodeSealed(sealed);
+    ChannelRouter.transitionToChannel(channelId); // open/focus the DM so its message box is the target
+    setTimeout(() => insertTextIntoChatInputBox(wire), 100); // let the channel switch settle, then paste
+    Toasts.show({
+        message: `Key for ${guildName} is in the message box — review and send it.`,
+        id: Toasts.genId(),
+        type: Toasts.Type.SUCCESS
+    });
+}
+
+// Open the server-icon picker (send mode) in a DM, listing servers that currently have a key.
+function openSendKeyPicker(channelId: string) {
+    openModal(props => (
+        <GuildKeyPicker
+            rootProps={props}
+            mode="send"
+            onSend={sourceCtx => sendServerKey(channelId, sourceCtx)}
+        />
+    ));
+}
+
+// Group-DM key distribution: seal the group's current key to ALL pinned recipients (≤10) at once,
+// posting a single sealed message in the group DM. Each recipient saves it via the key-transfer card.
+async function distributeGroupKey(channelId: string) {
+    const channel = ChannelStore.getChannel(channelId);
+    if (!channel) return;
+
+    const ctx = getContext(channel, getSelfId());
+    if (ctx.type !== "groupdm") {
+        Toasts.show({
+            message: "Group key distribution is only available in group DMs.",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    const id = getIdentity();
+    if (!id) {
+        Toasts.show({
+            message: "Your encryption identity is not ready yet.",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    const rec = getRecord(contextKey(ctx));
+    const current = rec.currentKeyId && rec.keys.find(k => k.keyId === rec.currentKeyId);
+    if (!current) {
+        Toasts.show({
+            message: "Set a key for this group DM first.",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    const selfId = getSelfId();
+    const recipientIds = (channel.recipients ?? []).filter(r => r !== selfId);
+    const recipients = recipientIds.map(r => getPeer(r)).filter((p): p is NonNullable<typeof p> => !!p);
+    if (recipients.length === 0) {
+        Toasts.show({
+            message: "No pinned recipients yet — exchange keys with members first.",
+            id: Toasts.genId(),
+            type: Toasts.Type.FAILURE
+        });
+        return;
+    }
+
+    const missing = recipientIds.length - recipients.length;
+    const bundles = recipients.map(p => p.bundle).slice(0, 9); // ≤10 wraps incl. self
+
+    const text = buildKeyTransfer({
+        guildId: ctx.id,
+        guildName: channel.name || "Group DM",
+        password: current.password,
+        fromFingerprint: id.fingerprint,
+    });
+    const sealed = await sealTo(text, [publicBundle(id), ...bundles], id.ecdsaPrivateJwk);
+    sendMessage(channelId, { content: encodeSealed(sealed) });
+    Toasts.show({
+        message: missing > 0
+            ? `Distributed the group key to ${bundles.length} member(s); ${missing} not yet pinned.`
+            : `Distributed the group key to ${bundles.length} member(s).`,
+        id: Toasts.genId(),
+        type: Toasts.Type.SUCCESS
+    });
+}
+
+// User context menu (DM): "Start encrypted chat" → publishes your public key to that DM;
+// once a peer is pinned, also offers "Send a server's key" via the server-icon picker.
+const userCtxPatch: NavContextMenuPatchCallback = (children, { channel }: { channel?: Channel; user?: User; }) => {
+    if (!channel || !channel.isDM?.()) return;
+    children.push(
+        <Menu.MenuItem
+            id="vc-chatenc-start-encrypted"
+            label="Share my encryption key"
+            icon={EncryptionIcon}
+            action={() => startEncryptedChat(channel.id)}
+        />
+    );
+    if (getPeer(getContext(channel, getSelfId()).id)) {
+        children.push(
+            <Menu.MenuItem
+                id="vc-chatenc-send-server-key"
+                label="Send a server's key"
+                icon={EncryptionIcon}
+                action={() => openSendKeyPicker(channel.id)}
+            />
+        );
+    }
+};
+
+// Group-DM context menu: "Distribute group key" → seals the group key to all pinned members.
+const gdmCtxPatch: NavContextMenuPatchCallback = (children, { channel }: { channel?: Channel; }) => {
+    if (!channel) return;
+    children.push(
+        <Menu.MenuItem
+            id="vc-chatenc-distribute-group-key"
+            label="Distribute group key"
+            icon={EncryptionIcon}
+            action={() => distributeGroupKey(channel.id)}
+        />
+    );
+};
+
 
 export default definePlugin({
     name: "ChatEncryption",
@@ -561,7 +860,10 @@ export default definePlugin({
 
     contextMenus: {
         "message": messageCtxPatch,
-        "image-context": imageContextMenuPatch
+        "image-context": imageContextMenuPatch,
+        "guild-header-popout": guildHeaderCtxPatch,
+        "user-context": userCtxPatch,
+        "gdm-context": gdmCtxPatch
     },
 
     renderMessageAccessory: props => <EncryptionAccessory message={props.message} />,
@@ -596,7 +898,7 @@ export default definePlugin({
                         if (uploadConfig && uploadConfig.files && Array.isArray(uploadConfig.files)) {
                             console.log("ChatEncryption: Found files in uploadConfig:", uploadConfig.files);
                             
-                            if ((settings.store.autoEncryptImages || settings.store.autoEncryptVideos || settings.store.autoEncryptAudio || settings.store.autoEncryptFiles) && settings.store.autoEncrypt && settings.store.secretPhrase) {
+                            if (shouldEncryptAttachments()) {
                                 console.log("ChatEncryption: Processing files...");
                                 const processedFiles = await this.processFilesBeforeAdd(uploadConfig.files);
                                 
@@ -642,30 +944,26 @@ export default definePlugin({
         const filesArray = Array.isArray(files) ? files : [files];
         console.log("ChatEncryption: filesArray:", filesArray);
         
-        if (!settings.store.autoEncrypt || !settings.store.secretPhrase) {
-            console.log("ChatEncryption: Skipping - encryption not enabled or no secret phrase");
+        if (!shouldEncryptAttachments()) {
+            console.log("ChatEncryption: Skipping - encryption not enabled or no key for this context");
             return files;
         }
 
-        // Process each file and replace with encrypted version if encryption is enabled for that type
+        // Process each file and replace with encrypted version (all types in this context)
         const processedFiles = [];
         for (let i = 0; i < filesArray.length; i++) {
             const fileItem = filesArray[i];
             console.log(`ChatEncryption: Processing file ${i}:`, fileItem);
-            
+
             const actualFile = fileItem.file || fileItem;
-            const shouldEncryptImage = isImageFile(fileItem) && settings.store.autoEncryptImages;
-            const shouldEncryptVideo = isVideoFile(fileItem) && settings.store.autoEncryptVideos;
-            const shouldEncryptAudio = isAudioFile(fileItem) && settings.store.autoEncryptAudio;
-            const shouldEncryptFile = !isImageFile(fileItem) && !isVideoFile(fileItem) && !isAudioFile(fileItem) && settings.store.autoEncryptFiles;
-            
-            if (fileItem && (shouldEncryptImage || shouldEncryptVideo || shouldEncryptAudio || shouldEncryptFile)) {
+
+            if (fileItem) {
                 try {
                     let fileType = "file";
-                    if (shouldEncryptImage) fileType = "image";
-                    else if (shouldEncryptVideo) fileType = "video";
-                    else if (shouldEncryptAudio) fileType = "audio";
-                    
+                    if (isImageFile(fileItem)) fileType = "image";
+                    else if (isVideoFile(fileItem)) fileType = "video";
+                    else if (isAudioFile(fileItem)) fileType = "audio";
+
                     console.log(`ChatEncryption: Encrypting ${fileType} file:`, actualFile.name);
                     
                     const encryptedFile = await createEncryptedFile(actualFile);
@@ -698,8 +996,8 @@ export default definePlugin({
     async processUploadsBlocking(uploads: any[]) {
         console.log("ChatEncryption: processUploadsBlocking called with uploads:", uploads);
         
-        if (!settings.store.autoEncryptImages || !settings.store.secretPhrase) {
-            console.log("ChatEncryption: Skipping - settings not enabled");
+        if (!shouldEncryptAttachments()) {
+            console.log("ChatEncryption: Skipping - encryption not enabled or no key for this context");
             return;
         }
 
@@ -1260,12 +1558,22 @@ export default definePlugin({
         }
     },
 
-    start() {
+    async start() {
         console.log("ChatEncryption: Plugin starting...");
-        
+
+        // Load the per-context key/record store before any decrypt sweep, driving the vault unlock flow
+        const status = await loadStore();
+        if (status === "locked") {
+            openModal(props => <VaultUnlockModal rootProps={props} fresh={false} />);
+        } else if (status === "fresh" && settings.store.vaultEncrypted) {
+            openModal(props => <VaultUnlockModal rootProps={props} fresh={true} />);
+        } else {
+            await ensureIdentity(); // plaintext vault or already-loaded: make sure identity exists
+        }
+
         // Clean up old cached data without dimensions
         cleanupLegacyCache();
-        
+
         // Auto-decrypt messages when the plugin starts
         this.autoDecryptVisibleMessages();
         
@@ -1322,15 +1630,8 @@ export default definePlugin({
     },
 
     async autoDecryptVisibleMessages() {
-        // This will be called to decrypt all visible messages
-        const allPhrases = [
-            settings.store.secretPhrase,
-            ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-        ].filter(Boolean);
-
-        if (allPhrases.length === 0) return;
-
-        // Process messages in the background, with delay to let Discord load messages first
+        // Process messages in the background, with delay to let Discord load messages first.
+        // decryptAllQueuedMessages resolves each message's per-context key internally.
         setTimeout(async () => {
             const { decryptAllQueuedMessages, restoreAllCachedAttachments } = await import("./EncryptionAccessory");
             
@@ -1374,66 +1675,76 @@ export default definePlugin({
                         }
                     }
 
-                    if (isEncryptedMessage(contentToDecrypt)) {
-                        // Try auto-decryption first
-                        const allPhrases = [
-                            settings.store.secretPhrase,
-                            ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-                        ].filter(Boolean);
-
-                        if (allPhrases.length > 0) {
-                            const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
-                            if (result.success) {
-                                handleDecryption(message.id, result);
-                                return;
-                            }
-                        }
+                    const outcome = await decryptForChannel(message.channel_id, contentToDecrypt);
+                    if (outcome.state === "decrypted") {
+                        handleDecryption(message.id, { text: outcome.text, success: true });
+                    } else if (outcome.state === "no-key") {
+                        Toasts.show({
+                            message: "No encryption key set for this context.",
+                            id: Toasts.genId(),
+                            type: Toasts.Type.FAILURE
+                        });
+                    } else if (outcome.state === "missing-key") {
+                        Toasts.show({
+                            message: "Encrypted with a key you don't have — ask for the current key.",
+                            id: Toasts.genId(),
+                            type: Toasts.Type.MESSAGE
+                        });
                     }
-
-                    // Show manual decryption modal
-                    openModal(props => (
-                        <DecryptionModal
-                            rootProps={props}
-                            encryptedContent={contentToDecrypt}
-                            onSuccess={(decryptedText, usedPhrase) => {
-                                handleDecryption(message.id, { text: decryptedText, success: true });
-                            }}
-                        />
-                    ));
                 }
             };
         }
     },
 
-    async onBeforeMessageSend(_, message) {
-        if (!settings.store.autoEncrypt) return;
+    async onBeforeMessageSend(channelId, message) {
         if (!message.content) return;
-        if (!settings.store.secretPhrase) {
-            console.warn("Auto-encrypt enabled but no secret phrase set");
+        const channel = ChannelStore.getChannel(channelId);
+        if (!channel) return;
+
+        const ctx = getContext(channel, getSelfId());
+        const ck = contextKey(ctx);
+        const record = getRecord(ck);
+
+        // A key-announce handshake is a public key, not an encryptable message — never seal it.
+        // Apply steganography here (send time) if enabled for this context, exactly like encrypted messages.
+        if (isKeyAnnounce(message.content)) {
+            message.content = await stegoOrVisible(message.content, record.stego, 0);
             return;
         }
 
-        setShouldShowEncryptionEnabledTooltip?.(true);
-        clearTimeout(tooltipTimeout);
-        tooltipTimeout = setTimeout(() => setShouldShowEncryptionEnabledTooltip?.(false), 2000);
-
-        const result = await encrypt(message.content, settings.store.secretPhrase);
-        if (result.success) {
-            if (settings.store.useHiddenMessages) {
-                // Use steganographic hiding mode
-                try {
-                    const hiddenMessage = await createHiddenMessage(result.text);
-                    message.content = hiddenMessage;
-                } catch (error) {
-                    console.error("Failed to create hidden message, falling back to normal encryption:", error);
-                    message.content = result.text;
-                }
-            } else {
-                // Use normal encryption display
-                message.content = result.text;
-            }
-        } else {
-            console.error("Failed to encrypt message:", result.error);
+        // Already-encrypted content (e.g. a pasted key-transfer [PGP:…] or symmetric [ENC:…]) — never
+        // re-encrypt it; just hide it if stego is on for this context.
+        if (isSealedWire(message.content) || isEncoded(message.content)) {
+            message.content = await stegoOrVisible(message.content, record.stego, 0);
+            return;
         }
+
+        // 1:1 DM sealed-box (PGP) path — needs both our identity and the peer's pinned key.
+        if (ctx.type === "dm") {
+            if (!getChannelAutoEncrypt(channelId)) return;
+            const id = getIdentity();
+            const peer = getPeer(ctx.id);
+            if (!id) return; // identity not ready yet — send plaintext rather than break
+            if (!peer) { await publishKeyIfNeeded(channelId); return; } // can't encrypt without their key
+
+            const { text, mentions } = splitMentions(message.content);
+            const sealed = await sealTo(text, [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk);
+            const encoded = encodeSealed(sealed);
+            const suffix = mentions.length ? ` ${mentions.join(" ")}` : "";
+            message.content = (await stegoOrVisible(encoded, record.stego, suffix.length)) + suffix;
+            return;
+        }
+
+        // Guild / group-DM symmetric path (Phase 1)
+        if (!getChannelAutoEncrypt(channelId)) return;
+
+        const current = await getCurrentKey(ctx);
+        if (!current) return; // no key — send plaintext rather than break
+
+        const { text, mentions } = splitMentions(message.content);
+        const payload = await encryptSym(text, current.key, current.keyId, ck);
+        const encoded = encodeMessage(payload);
+        const suffix = mentions.length ? ` ${mentions.join(" ")}` : "";
+        message.content = (await stegoOrVisible(encoded, record.stego, suffix.length)) + suffix;
     }
 });

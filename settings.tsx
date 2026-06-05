@@ -1,65 +1,35 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
+import { PgpSettings } from "./PgpSettings";
+
+// Per-context state (passwords, history, auto-encrypt, stego) lives in DataStore via store.ts —
+// NOT here. These settings are global toggles only.
 export const settings = definePluginSettings({
-    secretPhrase: {
-        type: OptionType.STRING,
-        description: "Secret phrase for encryption/decryption",
-        default: "",
-        hidden: true
-    },
-    backupSecretPhrases: {
-        type: OptionType.STRING,
-        description: "Backup secret phrases (comma-separated) for decryption",
-        default: "",
-        hidden: true
-    },
-    autoEncrypt: {
+    vaultEncrypted: {
         type: OptionType.BOOLEAN,
-        description: "Automatically encrypt all outgoing messages",
-        default: false,
-        hidden: true
+        description: "Encrypt the local key vault at rest (prompts for a master passphrase once per launch). Disable to store keys in plaintext.",
+        default: true,
     },
     showAutoEncryptAlert: {
         type: OptionType.BOOLEAN,
-        description: "Show alert when auto-encrypt is enabled",
+        description: "Show an alert the first time auto-encrypt is enabled for a context",
         default: true,
-        hidden: false
+        hidden: true,
     },
     showAutoEncryptTooltip: {
         type: OptionType.BOOLEAN,
-        description: "Show tooltip when auto-encrypt is enabled",
+        description: "Show a tooltip on the chat-bar button when a message is auto-encrypted",
         default: true,
-        hidden: true
     },
-    useHiddenMessages: {
+    defaultStego: {
         type: OptionType.BOOLEAN,
-        description: "Hide encrypted messages in innocent-looking text",
+        description: "Default new contexts to steganographic (hidden) message mode",
         default: false,
-        hidden: true
+        hidden: true,
     },
-    autoEncryptImages: {
-        type: OptionType.BOOLEAN,
-        description: "Automatically encrypt image attachments",
-        default: false,
-        hidden: true
+    managePgp: {
+        type: OptionType.COMPONENT,
+        component: () => <PgpSettings />,
     },
-    autoEncryptVideos: {
-        type: OptionType.BOOLEAN,
-        description: "Automatically encrypt video attachments",
-        default: false,
-        hidden: true
-    },
-    autoEncryptAudio: {
-        type: OptionType.BOOLEAN,
-        description: "Automatically encrypt audio attachments",
-        default: false,
-        hidden: true
-    },
-    autoEncryptFiles: {
-        type: OptionType.BOOLEAN,
-        description: "Automatically encrypt other file attachments",
-        default: false,
-        hidden: true
-    }
 });

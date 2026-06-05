@@ -1,11 +1,62 @@
+import { openModal } from "@utils/modal";
 import { Message } from "@vencord/discord-types";
-import { useEffect, useState } from "@webpack/common";
+import { Alerts, Button, ChannelStore, useEffect, useReducer, useState } from "@webpack/common";
 import { FluxDispatcher } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
+import { openSealed } from "./crypto/asymmetric";
+import { decodeKeyAnnounce, decodeMessage, decodeSealedWire, isEncoded, isKeyAnnounce, isSealedWire } from "./crypto/codec";
+import { contextKey, getContext } from "./crypto/context";
+import { KeyTransfer, parseKeyTransfer } from "./crypto/keytransfer";
+import { decryptSym } from "./crypto/symmetric";
 import { EncryptionIcon } from "./EncryptionIcon";
-import { settings } from "./settings";
-import { cl, decryptWithMultiplePhrases, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage, isEncryptedImageMessage, decryptImageMessage, ImageEncryptionData, isEncryptedVideoMessage, decryptVideoMessage, VideoEncryptionData, isEncryptedAudioMessage, decryptAudioMessage, AudioEncryptionData, isEncryptedFileMessage, decryptFileMessage, FileEncryptionData } from "./utils";
+import { GuildKeyPicker } from "./GuildKeyPicker";
+import { getCurrentPassword, getForgottenAt, getIdentity, getKeyById, getPeer, getRecord, getSelfId, pinPeer, subscribe } from "./store";
+import { cl, EncryptionResult, isEncryptedMessage, isHiddenMessage, extractHiddenMessage, isEncryptedImageMessage, decryptImageMessage, ImageEncryptionData, isEncryptedVideoMessage, decryptVideoMessage, VideoEncryptionData, isEncryptedAudioMessage, decryptAudioMessage, AudioEncryptionData, isEncryptedFileMessage, decryptFileMessage, FileEncryptionData } from "./utils";
+
+export type DecryptOutcome =
+    | { state: "plain"; }
+    | { state: "decrypted"; text: string; }
+    | { state: "no-key"; }
+    | { state: "missing-key"; keyId: string; };
+
+/** Per-context decrypt for a single channel's message content. */
+export async function decryptForChannel(channelId: string, content: string): Promise<DecryptOutcome> {
+    // 1:1 DM sealed-box (PGP) path — opened with our own ECDH private key.
+    if (isSealedWire(content)) {
+        const sealed = decodeSealedWire(content);
+        const id = getIdentity();
+        if (!sealed || !id) return { state: "no-key" };
+        try {
+            const text = await openSealed(sealed, id.fingerprint, id.ecdhPrivateJwk);
+            return { state: "decrypted", text };
+        } catch {
+            return { state: "missing-key", keyId: "dm" };
+        }
+    }
+
+    if (!isEncoded(content)) return { state: "plain" };
+    const channel = ChannelStore.getChannel(channelId);
+    if (!channel) return { state: "plain" };
+
+    const ctx = getContext(channel, getSelfId());
+    const ck = contextKey(ctx);
+    const payload = decodeMessage(content);
+    if (!payload) return { state: "plain" };
+
+    const record = getRecord(ck);
+    if (record.keys.length === 0) return { state: "no-key" };
+
+    const key = await getKeyById(ctx, payload.keyId);
+    if (!key) return { state: "missing-key", keyId: payload.keyId };
+
+    try {
+        const text = await decryptSym(payload, key, ck);
+        return { state: "decrypted", text };
+    } catch {
+        return { state: "missing-key", keyId: payload.keyId };
+    }
+}
 
 // Cache for downloaded attachment content to avoid re-downloading
 const AttachmentContentCache = new Map<string, string>();
@@ -18,6 +69,7 @@ const DecryptedImages = new Map<string, ImageEncryptionData>(); // messageId -> 
 const DecryptedVideos = new Map<string, VideoEncryptionData>(); // messageId -> decrypted video data
 const DecryptedAudio = new Map<string, AudioEncryptionData>(); // messageId -> decrypted audio data
 const DecryptedFiles = new Map<string, FileEncryptionData>(); // messageId -> decrypted file data
+export const KeyTransfers = new Map<string, KeyTransfer>(); // messageId -> parsed key transfer
 const ProcessedAttachments = new Set<string>(); // Track processed attachment URLs to avoid re-processing
 const DownloadQueue = new Map<string, Promise<string>>(); // Track ongoing downloads to avoid duplicates
 const UpgradeProcessed = new Set<string>(); // Track attachments we've already attempted to upgrade
@@ -136,6 +188,24 @@ function markAudioElementForDownload(encryptedAudioKey: string, blobUrl: string)
 }
 
 export function handleDecryption(messageId: string, data: EncryptionResult) {
+    // Key-transfer payloads decrypt to a JSON control message — never expose them as message text.
+    // Capture the parsed transfer so the accessory renders the key-transfer card instead.
+    if (data.success) {
+        const kt = parseKeyTransfer(data.text);
+        if (kt) {
+            KeyTransfers.set(messageId, kt);
+
+            // Trigger re-render so the card appears
+            const updateTrigger = UpdateTriggers.get(messageId);
+            if (updateTrigger) updateTrigger();
+            setTimeout(() => {
+                const trigger = UpdateTriggers.get(messageId);
+                if (trigger) trigger();
+            }, 50);
+            return;
+        }
+    }
+
     DecryptedMessages.set(messageId, data);
 
     if (data.success) {
@@ -308,15 +378,8 @@ export async function restoreAllCachedAttachments() {
     }
 }
 
-// Function to decrypt all queued messages with new phrases
+// Function to decrypt all queued messages against their per-context keys
 export async function decryptAllQueuedMessages() {
-    const allPhrases = [
-        settings.store.secretPhrase,
-        ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-    ].filter(Boolean);
-
-    if (allPhrases.length === 0) return;
-
     // Process all encrypted messages that haven't been decrypted yet
     for (const [messageId, encryptedContent] of EncryptedMessageQueue.entries()) {
         if (!DecryptedMessages.has(messageId)) {
@@ -332,9 +395,10 @@ export async function decryptAllQueuedMessages() {
                     }
                 }
 
-                const result = await decryptWithMultiplePhrases(contentToDecrypt, allPhrases);
-                if (result.success) {
-                    handleDecryption(messageId, result);
+                if (!messageInstance) continue;
+                const outcome = await decryptForChannel(messageInstance.channel_id, contentToDecrypt);
+                if (outcome.state === "decrypted") {
+                    handleDecryption(messageId, { text: outcome.text, success: true });
                     EncryptedMessageQueue.delete(messageId); // Remove from queue once decrypted
                 }
             } catch (error) {
@@ -575,17 +639,19 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
 
         console.log("ChatEncryption: Downloaded content preview:", textContent.substring(0, 100));
 
+        // Resolve the per-context password for this message's channel (attachments derive from it)
+        const attachmentChannel = ChannelStore.getChannel(message.channel_id);
+        const attachmentPassword = attachmentChannel
+            ? getCurrentPassword(getContext(attachmentChannel, getSelfId()))
+            : null;
+        const allPhrases = attachmentPassword ? [attachmentPassword] : [];
+
         // Check if this looks like our encrypted image format
         if (textContent.startsWith('[IMG_ENC:v1:')) {
             //console.log("ChatEncryption: Found encrypted image attachment");
 
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt with all available phrases
+                // Try to decrypt with the per-context password
                 for (const phrase of allPhrases) {
                     const result = await decryptImageMessage(textContent, phrase);
                     if (result.success && result.imageData) {
@@ -638,13 +704,8 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
         else if (textContent.startsWith('[VID_ENC:v1:')) {
             console.log("ChatEncryption: Found encrypted video attachment");
 
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt with all available phrases
+                // Try to decrypt with the per-context password
                 for (const phrase of allPhrases) {
                     const result = await decryptVideoMessage(textContent, phrase);
                     if (result.success && result.videoData) {
@@ -850,13 +911,8 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
         else if (textContent.startsWith('[AUD_ENC:v1:')) {
             console.log("ChatEncryption: Found encrypted audio attachment");
 
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt with all available phrases
+                // Try to decrypt with the per-context password
                 for (const phrase of allPhrases) {
                     const result = await decryptAudioMessage(textContent, phrase);
                     if (result.success && result.audioData) {
@@ -918,13 +974,8 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
         else if (textContent.startsWith('[FILE_ENC:v1:')) {
             console.log("ChatEncryption: Found encrypted file attachment");
 
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt with all available phrases
+                // Try to decrypt with the per-context password
                 for (const phrase of allPhrases) {
                     const result = await decryptFileMessage(textContent, phrase);
                     if (result.success && result.fileData) {
@@ -970,9 +1021,29 @@ async function handleEncryptedAttachment(message: Message, attachment: any) {
     }
 }
 
+// Approximate a message's creation time from its snowflake id (Discord epoch = 2015-01-01).
+function snowflakeTime(id: string): number {
+    try {
+        return Number(BigInt(id) >> 22n) + 1420070400000;
+    } catch {
+        return Date.now();
+    }
+}
+
 export function EncryptionAccessory({ message }: { message: Message; }) {
     const [decryptedContent, setDecryptedContent] = useState<string | null>(null);
     const [isEncrypted, setIsEncrypted] = useState(false);
+    // Per-context receive state for the hint UI: null = nothing to show
+    const [receiveState, setReceiveState] = useState<"no-key" | "missing-key" | null>(null);
+    // TOFU handshake: fingerprint of a peer key auto-pinned from this message (null = no handshake)
+    const [pinnedFingerprint, setPinnedFingerprint] = useState<string | null>(null);
+    // A handshake key that's visible but NOT saved (older than a "forget") — offered for manual save.
+    const [oldKeyFp, setOldKeyFp] = useState<string | null>(null);
+    // Force a re-render after capturing a key-transfer (which lives outside React state)
+    const [, forceTick] = useReducer(x => x + 1, 0);
+    // Re-run decryption when the key store changes (e.g. a key was just added that can now decrypt this message)
+    const [storeTick, bumpStore] = useReducer(x => x + 1, 0);
+    useEffect(() => subscribe(bumpStore), []);
 
     // Store message instance for potential updates (like text decryption does)
     MessageInstances.set(message.id, message);
@@ -1199,7 +1270,53 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
     useEffect(() => {
         if ((message as any).vencordEmbeddedBy) return;
 
-        const messageContent = message.content || "";
+        const rawContent = message.content || "";
+        // Unwrap steganographic cover text first, so hidden key-announces and sealed/symmetric payloads are detected.
+        const messageContent = isHiddenMessage(rawContent) ? (extractHiddenMessage(rawContent) ?? rawContent) : rawContent;
+
+        // TOFU handshake: a public key was posted — show a note (both sides) and record a peer's key.
+        if (isKeyAnnounce(messageContent)) {
+            const channel = ChannelStore.getChannel(message.channel_id);
+            const authorId = message.author?.id;
+            const bundle = decodeKeyAnnounce(messageContent);
+            if (bundle) {
+                // "Mine" if WE authored it, OR if the announced key IS our own (someone copied/echoed our
+                // key message back) — either way, never record our own key as a peer's.
+                const isMine = (!!authorId && authorId === getSelfId()) || bundle.fingerprint === getIdentity()?.fingerprint;
+                const existing = authorId ? getPeer(authorId) : undefined;
+                // Ignore a handshake OLDER than the last "forget" for this peer, so forgetting sticks even
+                // while the old [PGPKEY:…] message is still on screen. A genuine re-share is a newer message.
+                const forgotten = !isMine && !existing && !!authorId && snowflakeTime(message.id) <= getForgottenAt(authorId);
+
+                if (!forgotten) {
+                    setOldKeyFp(null);
+                    // Show the fingerprint immediately on BOTH sides. For a changed key keep the trusted one.
+                    setPinnedFingerprint(existing && !isMine ? existing.bundle.fingerprint : bundle.fingerprint);
+
+                    // Record a peer's key (TOFU) — only for OTHERS' keys, only in a 1:1 DM.
+                    if (!isMine && authorId && channel && getContext(channel, getSelfId()).type === "dm") {
+                        pinPeer(authorId, bundle).then(result => {
+                            if (result === "changed") {
+                                const trusted = getPeer(authorId);
+                                if (trusted) setPinnedFingerprint(trusted.bundle.fingerprint);
+                                Alerts.show({
+                                    title: "Encryption key mismatch",
+                                    body: `⚠ A different encryption key was posted for ${(message.author as any)?.username ?? "this user"}. It was NOT trusted — your originally-recorded key is kept (a message edit or impersonation can cause this). To intentionally accept a new key, use "Forget key" for this peer in plugin settings, then have them re-share.\n\nRejected key: ${bundle.fingerprint}`,
+                                });
+                            }
+                        }).catch(error => {
+                            console.error("ChatEncryption: Failed to pin peer key:", error);
+                        });
+                    }
+                } else {
+                    // Old/forgotten handshake — show it as visible-but-not-saved; right-click → "Save PGP key".
+                    setPinnedFingerprint(null);
+                    setOldKeyFp(bundle.fingerprint);
+                }
+            }
+            return; // key-announce carries no decryptable body
+        }
+
         let contentToDecrypt = messageContent;
         let isEncryptedMsg = false;
         let isEncryptedImg = false;
@@ -1227,10 +1344,10 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
             const extractedEncrypted = extractHiddenMessage(messageContent);
             if (extractedEncrypted) {
                 contentToDecrypt = extractedEncrypted;
-                isEncryptedMsg = isEncryptedMessage(contentToDecrypt);
+                isEncryptedMsg = isEncoded(contentToDecrypt) || isSealedWire(contentToDecrypt) || isEncryptedMessage(contentToDecrypt);
             }
         } else {
-            isEncryptedMsg = isEncryptedMessage(messageContent);
+            isEncryptedMsg = isEncoded(messageContent) || isSealedWire(messageContent) || isEncryptedMessage(messageContent);
             isEncryptedImg = isEncryptedImageMessage(messageContent);
         }
 
@@ -1239,15 +1356,15 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         const isEncryptedFile = isEncryptedFileMessage(messageContent);
         setIsEncrypted(isEncryptedMsg || isEncryptedImg || isEncryptedVid || isEncryptedAud || isEncryptedFile || hasEncryptedAttachment);
 
+        // Resolve the per-context password for this message's channel (in-message media derive from it)
+        const channel = ChannelStore.getChannel(message.channel_id);
+        const ctxPassword = channel ? getCurrentPassword(getContext(channel, getSelfId())) : null;
+        const allPhrases = ctxPassword ? [ctxPassword] : [];
+
         // Handle encrypted image messages
         if (isEncryptedImg && !DecryptedImages.has(message.id)) {
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt the image with all available phrases
+                // Try to decrypt the image with the per-context password
                 (async () => {
                     for (const phrase of allPhrases) {
                         const result = await decryptImageMessage(messageContent, phrase);
@@ -1269,13 +1386,8 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
 
         // Handle encrypted video messages
         if (isEncryptedVid && !DecryptedVideos.has(message.id)) {
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt the video with all available phrases
+                // Try to decrypt the video with the per-context password
                 (async () => {
                     for (const phrase of allPhrases) {
                         const result = await decryptVideoMessage(messageContent, phrase);
@@ -1297,13 +1409,8 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
 
         // Handle encrypted audio messages
         if (isEncryptedAud && !DecryptedAudio.has(message.id)) {
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt the audio with all available phrases
+                // Try to decrypt the audio with the per-context password
                 (async () => {
                     for (const phrase of allPhrases) {
                         const result = await decryptAudioMessage(messageContent, phrase);
@@ -1325,13 +1432,8 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
 
         // Handle encrypted file messages
         if (isEncryptedFile && !DecryptedFiles.has(message.id)) {
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
-
             if (allPhrases.length > 0) {
-                // Try to decrypt the file with all available phrases
+                // Try to decrypt the file with the per-context password
                 (async () => {
                     for (const phrase of allPhrases) {
                         const result = await decryptFileMessage(messageContent, phrase);
@@ -1364,41 +1466,45 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
         if (isEncryptedMsg) {
             //console.log("ChatEncryption: Processing encrypted text message:", message.id, "Content to decrypt:", contentToDecrypt.substring(0, 50));
 
-            const allPhrases = [
-                settings.store.secretPhrase,
-                ...settings.store.backupSecretPhrases.split(',').map(p => p.trim()).filter(Boolean)
-            ].filter(Boolean);
+            // Per-context decrypt against the channel's keys (current + history)
+            decryptForChannel(message.channel_id, contentToDecrypt)
+                .then(outcome => {
+                    if (outcome.state === "decrypted") {
+                        setReceiveState(null);
 
-            if (allPhrases.length > 0) {
-                //console.log("ChatEncryption: Starting text decryption with", allPhrases.length, "phrases");
-                // Process decryption immediately and independently of any image processing
-                decryptWithMultiplePhrases(contentToDecrypt, allPhrases)
-                    .then(result => {
-                        //console.log("ChatEncryption: Text decryption result:", result.success ? "SUCCESS" : "FAILED", message.id);
-                        if (result.success) {
-                            //console.log("ChatEncryption: Setting decrypted text for message:", message.id);
-                            DecryptedMessages.set(message.id, result);
-                            // Modify the message content directly
-                            (message as any).content = result.text;
-                            setDecryptedContent(result.text);
-
-                            // Force Discord to re-render this message using Flux
-                            FluxDispatcher.dispatch({
-                                type: "MESSAGE_UPDATE",
-                                message: message
-                            });
-                        } else {
-                            console.log("ChatEncryption: Text decryption failed:", result.error);
+                        // Key-transfer payloads decrypt to a JSON control message — never write that
+                        // into message.content. Capture it so the key-transfer card renders instead.
+                        const _kt = parseKeyTransfer(outcome.text);
+                        if (_kt) {
+                            KeyTransfers.set(message.id, _kt);
+                            forceTick();
+                            return;
                         }
-                    })
-                    .catch(error => {
-                        console.error("ChatEncryption: Auto-decryption failed for message:", message.id, error);
-                    });
-            } else {
-                console.log("ChatEncryption: No phrases available for text decryption");
-            }
+
+                        const result: EncryptionResult = { text: outcome.text, success: true };
+                        DecryptedMessages.set(message.id, result);
+                        // Modify the message content directly
+                        (message as any).content = outcome.text;
+                        setDecryptedContent(outcome.text);
+
+                        // Force Discord to re-render this message using Flux
+                        FluxDispatcher.dispatch({
+                            type: "MESSAGE_UPDATE",
+                            message: message
+                        });
+                    } else if (outcome.state === "no-key") {
+                        setReceiveState("no-key");
+                    } else if (outcome.state === "missing-key") {
+                        setReceiveState("missing-key");
+                    } else {
+                        console.log("ChatEncryption: Text decryption outcome:", outcome.state);
+                    }
+                })
+                .catch(error => {
+                    console.error("ChatEncryption: Auto-decryption failed for message:", message.id, error);
+                });
         }
-    }, [message.id, message.content]);
+    }, [message.id, message.content, storeTick]);
 
     // Check for decrypted messages, images, videos, audio, and files
     const decryptedResult = DecryptedMessages.get(message.id);
@@ -1406,6 +1512,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
     const decryptedVideo = DecryptedVideos.get(message.id);
     const decryptedAudio = DecryptedAudio.get(message.id);
     const decryptedFile = DecryptedFiles.get(message.id);
+    const keyTransfer = KeyTransfers.get(message.id) ?? null;
 
     // Check if any attachments for this message have been decrypted
     const hasDecryptedAttachments = Array.from(DecryptedImages.keys()).some(key => key.startsWith(`${message.id}-`));
@@ -1415,6 +1522,53 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
 
     // Don't show decrypted attachments in accessory - always use Discord's native viewer via attachment replacement
     const decryptedAttachments: ImageEncryptionData[] = [];
+
+    // Secure key-transfer card — a DM (or group DM) that carries a server/group key.
+    // Must run BEFORE the generic decrypted-result block so the transfer renders the card
+    // rather than a lock indicator, and so the JSON payload is never shown as text.
+    // Never auto-applies: the user explicitly picks a target via the server-icon picker.
+    if (keyTransfer) {
+        const peer = getPeer(message.author?.id ?? "");
+        const trusted = !!peer && peer.bundle.fingerprint === keyTransfer.fromFingerprint;
+        const channel = ChannelStore.getChannel(message.channel_id);
+        const fromCtx = channel ? getContext(channel, getSelfId()) : null;
+        const isGroupKey = fromCtx?.type === "groupdm" && keyTransfer.guildId === channel?.id;
+        const presetContext = isGroupKey ? fromCtx : undefined;
+
+        return (
+            <div className={cl({ "encryption-accessories": true })}>
+                <div className={cl("keytransfer-card")}>
+                    <div>
+                        🔑 <b>{(message.author as any)?.username ?? "Someone"}</b> shared a key for{" "}
+                        <b>{keyTransfer.guildName}</b>
+                    </div>
+                    {!peer ? (
+                        <div className={cl({ "hint": true, "untrusted": true })}>
+                            ⚠ No prior contact with this sender — verify before saving.
+                        </div>
+                    ) : (
+                        <div className={cl({ "hint": true, "trusted": trusted, "untrusted": !trusted })}>
+                            {trusted ? "✅" : "⚠"} {keyTransfer.fromFingerprint}
+                        </div>
+                    )}
+                    <Button
+                        size={Button.Sizes.SMALL}
+                        onClick={() => openModal(p => (
+                            <GuildKeyPicker
+                                rootProps={p}
+                                mode="save"
+                                presetGuildId={presetContext ? undefined : keyTransfer.guildId}
+                                presetContext={presetContext}
+                                password={keyTransfer.password}
+                            />
+                        ))}
+                    >
+                        Save key to server…
+                    </Button>
+                </div>
+            </div>
+        );
+    }
 
     if (decryptedResult?.success || decryptedImage || decryptedVideo || decryptedAudio || decryptedFile || hasDecryptedAttachments || hasDecryptedVideoAttachments || hasDecryptedAudioAttachments || hasDecryptedFileAttachments || decryptedAttachments.length > 0) {
         return (
@@ -1517,6 +1671,49 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                         </div>
                     </div>
                 ))}
+            </div>
+        );
+    }
+
+    // TOFU note — a public key from this message: ours (just shared) or a peer's (recorded on first sight)
+    if (pinnedFingerprint) {
+        const isMyKey = pinnedFingerprint === getIdentity()?.fingerprint;
+        return (
+            <div className={cl({ "encryption-accessories": true })}>
+                <span className={cl({ "hint": true })}>
+                    🔑 {isMyKey ? "your encryption key" : "saved their key"} · {pinnedFingerprint}
+                </span>
+            </div>
+        );
+    }
+
+    // An old/forgotten handshake — visible but not auto-saved. Offer manual recovery via right-click.
+    if (oldKeyFp) {
+        return (
+            <div className={cl({ "encryption-accessories": true })}>
+                <span className={cl({ "hint": true, "missing": true })}>
+                    🔑 old key (not saved) · {oldKeyFp} — verify, then right-click → “Save PGP key”
+                </span>
+            </div>
+        );
+    }
+
+    // Encrypted message we couldn't decrypt — show a subtle per-context hint instead of gibberish
+    if (receiveState === "no-key") {
+        return (
+            <div className={cl({ "encryption-accessories": true })}>
+                <span className={cl({ "hint": true, "nokey": true })}>
+                    🔴 Encrypted — no key set for this server
+                </span>
+            </div>
+        );
+    }
+    if (receiveState === "missing-key") {
+        return (
+            <div className={cl({ "encryption-accessories": true })}>
+                <span className={cl({ "hint": true, "missing": true })}>
+                    ⚠️ Encrypted with a key you don't have — ask for the current key
+                </span>
             </div>
         );
     }

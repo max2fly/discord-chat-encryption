@@ -15,6 +15,11 @@
     color: var(--green-330);
 }
 
+.vc-encryption-chat-button.vc-encryption-no-key { color: var(--status-danger); }      /* red */
+.vc-encryption-chat-button.vc-encryption-auto-on { color: var(--green-360); }          /* green */
+.vc-encryption-chat-button.vc-encryption-key-set { color: var(--interactive-normal); } /* grey */
+.vc-encryption-chat-button.vc-encryption-disabled { opacity: .4; }
+
 .vc-encryption-accessory {
     display: flex;
     align-items: flex-start;
@@ -352,4 +357,101 @@
 /* Hide encrypted text attachments when decrypted images are shown */
 .vc-encryption-hide-encrypted-attachment {
     display: none !important;
+}
+
+/* Per-context receive hints (no-key / missing-key) */
+.vc-encryption-hint {
+    font-size: 12px;
+    opacity: .8;
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.vc-encryption-hint.vc-encryption-missing {
+    color: var(--text-warning);
+}
+
+.vc-encryption-hint.vc-encryption-nokey {
+    color: var(--status-danger);
+}
+
+/* Server-icon picker (GuildKeyPicker) */
+.vc-encryption-guild-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 8px 0;
+    justify-content: flex-start;
+}
+
+.vc-encryption-guild-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    width: 80px;
+    padding: 8px 4px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.vc-encryption-guild-tile:hover {
+    background: var(--background-modifier-hover);
+}
+
+.vc-encryption-guild-tile img,
+.vc-encryption-guild-fallback {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.vc-encryption-guild-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--background-secondary-alt);
+    color: var(--text-normal);
+    font-size: 20px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.vc-encryption-guild-tile span {
+    font-size: 11px;
+    text-align: center;
+    color: var(--text-normal);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.vc-encryption-guild-tile.vc-encryption-preset {
+    background: var(--background-modifier-selected);
+    box-shadow: 0 0 0 2px var(--brand-500);
+}
+
+/* Key-transfer accessory card */
+.vc-encryption-keytransfer-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 10px 14px;
+    background: var(--background-secondary-alt);
+    border-left: 3px solid var(--brand-500);
+    border-radius: 8px;
+    max-width: 420px;
+}
+
+.vc-encryption-keytransfer-card .vc-encryption-untrusted {
+    color: var(--text-warning);
+}
+
+.vc-encryption-keytransfer-card .vc-encryption-trusted {
+    color: var(--text-positive);
 }

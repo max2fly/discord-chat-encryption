@@ -1,13 +1,18 @@
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
 import { classes } from "@utils/misc";
 import { openModal } from "@utils/modal";
-import { Alerts, Forms, Tooltip, useEffect, useState } from "@webpack/common";
+import { IconComponent } from "@utils/types";
+import { ChannelStore, SelectedChannelStore, useEffect, useReducer } from "@webpack/common";
 
-import { EncryptionModal } from "./EncryptionModal";
-import { settings } from "./settings";
+import { contextKey, getContext } from "./crypto/context";
+import { ContextRecord } from "./crypto/types";
+import { DmKeyMenu } from "./DmKeyMenu";
+import { KeyEntryModal } from "./KeyEntryModal";
+import { getChannelAutoEncrypt, getPeer, getRecord, getSelfId, setChannelAutoEncrypt, subscribe } from "./store";
 import { cl } from "./utils";
+import { ensureVaultUnlocked } from "./vaultGate";
 
-export function EncryptionIcon({ height = 20, width = 20, className }: { height?: number; width?: number; className?: string; }) {
+export const EncryptionIcon: IconComponent = ({ height = 20, width = 20, className }) => {
     return (
         <svg
             viewBox="0 0 24 24"
@@ -20,65 +25,65 @@ export function EncryptionIcon({ height = 20, width = 20, className }: { height?
     );
 }
 
-export let setShouldShowEncryptionEnabledTooltip: undefined | ((show: boolean) => void);
+// re-render this component whenever the store changes
+function useStoreTick() {
+    const [, force] = useReducer(x => x + 1, 0);
+    useEffect(() => subscribe(force), []);
+}
+
+function activeContext() {
+    const id = SelectedChannelStore.getChannelId();
+    const channel = id && ChannelStore.getChannel(id);
+    if (!channel) return null;
+    return getContext(channel, getSelfId());
+}
 
 export const EncryptionChatBarIcon: ChatBarButtonFactory = ({ isMainChat }) => {
-    const { autoEncrypt } = settings.use(["autoEncrypt"]);
-
-    const [shouldShowEncryptionEnabledTooltip, setter] = useState(false);
-    useEffect(() => {
-        setShouldShowEncryptionEnabledTooltip = setter;
-        return () => setShouldShowEncryptionEnabledTooltip = undefined;
-    }, []);
-
+    useStoreTick();
     if (!isMainChat) return null;
 
-    const toggle = () => {
-        const newState = !autoEncrypt;
-        settings.store.autoEncrypt = newState;
-        if (newState && settings.store.showAutoEncryptAlert !== false)
-            Alerts.show({
-                title: "Vencord Auto-Encrypt Enabled",
-                body: <>
-                    <Forms.FormText>
-                        You just enabled Auto Encrypt! Any message <b>will automatically be encrypted</b> before being sent.
-                    </Forms.FormText>
-                    <Forms.FormText>
-                        Make sure you have set a secret phrase in the encryption settings!
-                    </Forms.FormText>
-                </>,
-                confirmText: "Disable Auto-Encrypt",
-                cancelText: "Got it",
-                secondaryConfirmText: "Don't show again",
-                onConfirmSecondary: () => settings.store.showAutoEncryptAlert = false,
-                onConfirm: () => settings.store.autoEncrypt = false,
-                confirmColor: "vc-notification-log-danger-btn",
-            });
-    };
+    const channelId = SelectedChannelStore.getChannelId();
+    const ctx = activeContext();
+    const record: ContextRecord | null = ctx ? getRecord(contextKey(ctx)) : null;
+    const isDM = ctx?.type === "dm";
 
-    const button = (
+    // DMs use PGP: "has key" = we've recorded the peer's public key. Servers/group DMs use a symmetric key.
+    const hasKey = isDM ? !!(ctx && getPeer(ctx.id)) : !!record?.currentKeyId;
+    const auto = !!channelId && getChannelAutoEncrypt(channelId); // per-channel, not per-server
+
+    const openKeyEntry = () => ctx && openModal(props => <KeyEntryModal rootProps={props} context={ctx} />);
+    const toggleAuto = () => channelId && setChannelAutoEncrypt(channelId, !auto);
+
+    // state -> color class
+    const stateClass = !ctx ? "disabled" : !hasKey ? "no-key" : auto ? "auto-on" : "key-set";
+
+    return (
         <ChatBarButton
-            tooltip="Open Encryption Settings"
-            onClick={e => {
-                openModal(props => (
-                    <EncryptionModal rootProps={props} />
-                ));
+            tooltip={
+                isDM
+                    ? (!hasKey ? "Click to share your encryption key (PGP)"
+                        : auto ? "Encrypted DMs ON (right-click to disable)"
+                            : "Peer key recorded (right-click to enable encrypted DMs)")
+                    : (!hasKey ? "No key for this server — click to set"
+                        : auto ? "Auto-encrypt ON (right-click to disable)"
+                            : "Encryption ready (right-click to enable auto-encrypt)")
+            }
+            onClick={() => {
+                // DMs use PGP — open the key menu (share key to message box / forget peer / toggle), not a passphrase
+                if (isDM) { if (ctx && channelId) openModal(props => <DmKeyMenu rootProps={props} peerId={ctx.id} channelId={channelId} />); return; }
+                if (!ensureVaultUnlocked()) return; // locked → opens setup/unlock modal; retry after
+                openKeyEntry();
             }}
-            onContextMenu={toggle}
-            buttonProps={{
-                "aria-haspopup": "dialog"
+            onContextMenu={e => {
+                e.preventDefault();
+                if (isDM) { if (channelId) setChannelAutoEncrypt(channelId, !auto); return; }
+                if (!ensureVaultUnlocked()) return;
+                if (!hasKey) return openKeyEntry();
+                toggleAuto();
             }}
+            buttonProps={{ "aria-haspopup": "dialog" }}
         >
-            <EncryptionIcon className={cl({ "auto-encrypt": autoEncrypt, "chat-button": true })} />
+            <EncryptionIcon className={cl({ [stateClass]: true, "chat-button": true })} />
         </ChatBarButton>
     );
-
-    if (shouldShowEncryptionEnabledTooltip && settings.store.showAutoEncryptTooltip)
-        return (
-            <Tooltip text="Auto Encrypt Enabled" forceOpen>
-                {() => button}
-            </Tooltip>
-        );
-
-    return button;
 };

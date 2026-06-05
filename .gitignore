@@ -10,3 +10,8 @@ CLAUDE.md
 docs/
 .idea/
 tests/
+node_modules/
+
+package.json
+vitest.config.ts
+package-lock.json
