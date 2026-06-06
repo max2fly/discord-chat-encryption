@@ -6,7 +6,7 @@ import { insertTextIntoChatInputBox, sendMessage } from "@utils/discord";
 import { openModal } from "@utils/modal";
 import definePlugin from "@utils/types";
 import { Channel, Message, User } from "@vencord/discord-types";
-import { ChannelRouter, ChannelStore, GuildStore, Menu, SelectedChannelStore, Toasts, UserStore } from "@webpack/common";
+import { ChannelRouter, ChannelStore, GuildStore, Menu, SelectedChannelStore, StickersStore, Toasts, UserStore } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
 import { publicBundle, sealTo, serializeSealed } from "./crypto/asymmetric";
@@ -15,7 +15,7 @@ import { unpackBundle } from "./crypto/codec";
 import { contextKey, getContext } from "./crypto/context";
 import { makeCoverPng } from "./crypto/cover";
 import { utf8Encode } from "./crypto/encoding";
-import { CT_TEXT } from "./crypto/envelope";
+import { CT_STICKER, CT_TEXT, packStickerBody, StickerRef } from "./crypto/envelope";
 import { embedPrivateChunk } from "./crypto/imagecarrier";
 import { buildKeyAnnounceWire, buildSealedWire, buildSymWire, trialDecode } from "./crypto/stealth";
 import { detectWire, wrapWire } from "./crypto/stego";
@@ -31,7 +31,7 @@ import { ensureIdentity, forcePinPeer, getChannelAutoEncrypt, getContextKeys, ge
 import { settings } from "./settings";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { getRandomWords } from "./utils";
-import { cleanupLegacyCache, decryptedNameForUrl, mapAttachmentsForRender, mapEmbedsForRender } from "./EncryptionAccessory";
+import { cleanupLegacyCache, decryptedNameForUrl, mapAttachmentsForRender, mapEmbedsForRender, mapStickersForRender } from "./EncryptionAccessory";
 
 // Find Discord's upload modules  
 const UploadStore = findByPropsLazy("getUploads", "upload");
@@ -876,6 +876,12 @@ export default definePlugin({
                     // still gets our synthesized ones. The param IS the message (fakeNitro treats it so).
                     match: /renderEmbeds\((\i)\){/,
                     replace: (m, msg) => `${m}${msg}.embeds=$self.mapEmbeds(${msg}.embeds,${msg});`
+                },
+                {
+                    // Inject our decrypted native stickers into the stickers array (fakeNitro's
+                    // patchFakeNitroStickers mechanism). Render-time → revert-proof like mapAttachments.
+                    match: /renderStickersAccessories\((\i)\){let (\i)=\(0,\i\.\i\)\(\i\).+?;/,
+                    replace: (m, message, stickers) => `${m}${stickers}=$self.mapStickers(${stickers},${message});`
                 }
             ]
         }
@@ -899,6 +905,11 @@ export default definePlugin({
 
     mapEmbeds(embeds: any[], message: any) {
         try { return mapEmbedsForRender(message, embeds); } catch { return embeds; }
+    },
+
+    // Called by the renderStickersAccessories patch: append decrypted native stickers at render time.
+    mapStickers(stickers: any[], message: any) {
+        try { return mapStickersForRender(stickers, message); } catch { return stickers; }
     },
 
     chatBarButton: {
@@ -1393,8 +1404,10 @@ export default definePlugin({
         }
     },
 
-    async onBeforeMessageSend(channelId, message) {
-        if (!message.content) return;
+    async onBeforeMessageSend(channelId, message, extra) {
+        const stickerIds: string[] = extra?.stickers ?? [];
+        // Allow a sticker-only message (empty content) through; bail only if there's truly nothing.
+        if (!message.content && stickerIds.length === 0) return;
         const channel = ChannelStore.getChannel(channelId);
         if (!channel) return;
 
@@ -1405,10 +1418,32 @@ export default definePlugin({
 
         // Already a stealth wire (e.g. a pasted key-transfer / key-announce) — never re-encrypt; leave as-is.
         // Markerless: a single detectWire replaces the old marker-based double-seal guards.
-        if (detectWire(message.content)) return;
+        if (message.content && detectWire(message.content)) return;
 
-        const { text, mentions } = splitMentions(message.content);
+        const { text, mentions } = splitMentions(message.content || "");
         const suffix = mentions.length ? ` ${mentions.join(" ")}` : "";
+
+        // Resolve the outgoing stickers to compact refs. Unresolvable ids are dropped from OUR envelope
+        // and left in extra.stickers (graceful: they send as normal stickers rather than vanish).
+        const stickers: StickerRef[] = stickerIds
+            .map(id => StickersStore.getStickerById(id))
+            .filter(Boolean)
+            .map((s: any) => ({ id: s.id, name: s.name, formatType: s.format_type, type: s.type }));
+        const useSticker = stickers.length > 0;
+        // Sticker-only message whose ids ALL failed to resolve → don't emit an empty CT_TEXT envelope;
+        // bail and leave extra.stickers so the (unresolved) sticker just sends normally.
+        if (!message.content && !useSticker) return;
+        const contentType = useSticker ? CT_STICKER : CT_TEXT;
+        const body = useSticker ? packStickerBody(stickers, text) : utf8Encode(text);
+        // KNOWN LIMITATION: a sticker ref is tiny, so a sticker (or sticker-only) message always fits the
+        // inline stego/base64url transport. The ONE exception is a sticker sent together with very long
+        // text (> ~1900 chars) that pushes the wire over the cap — emit() would then carry this CT_STICKER
+        // envelope in a cover PNG, but openAttachment only decodes CT_TEXT/CT_FILE, so the recipient can't
+        // render it (benign: no plaintext leak, the sticker is still cleared; they just see the cover art).
+        // Closing it means teaching openAttachment + tryDecryptAttachment the sticker kind (deferred).
+
+        // Clear the real stickers so Discord transmits none. Call ONLY after a successful encrypt.
+        const consumeStickers = () => { if (extra?.stickers && useSticker) extra.stickers.length = 0; };
 
         // Frame the envelope bytes onto the wire: stego → hidden between cover words (if it fits the cap);
         // else a bare base64url token. The trailing mention suffix is preserved in both transports.
@@ -1450,7 +1485,8 @@ export default definePlugin({
             if (!id) return; // identity not ready yet — send plaintext rather than break
             if (!peer) { await publishKeyIfNeeded(channelId); return; } // can't encrypt without their key
 
-            await emit(await buildSealedWire(CT_TEXT, utf8Encode(text), [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk));
+            await emit(await buildSealedWire(contentType, body, [publicBundle(id), peer.bundle], id.ecdsaPrivateJwk));
+            consumeStickers();
             return;
         }
 
@@ -1460,6 +1496,7 @@ export default definePlugin({
         const current = await getCurrentKey(ctx);
         if (!current) return; // no key — send plaintext rather than break
 
-        await emit(await buildSymWire(CT_TEXT, utf8Encode(text), current.key, ck));
+        await emit(await buildSymWire(contentType, body, current.key, ck));
+        consumeStickers();
     }
 });

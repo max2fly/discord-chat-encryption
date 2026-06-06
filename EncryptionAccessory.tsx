@@ -10,6 +10,7 @@ import { toBase64 } from "./crypto/encoding";
 import { imageSize } from "./crypto/imagesize";
 import { KeyTransfer, parseKeyTransfer } from "./crypto/keytransfer";
 import { trialDecode } from "./crypto/stealth";
+import { StickerRef } from "./crypto/envelope";
 import { detectWire } from "./crypto/stego";
 import { cachedEmbed, findMediaUrls, resolveEmbed } from "./embeds";
 import { EncryptionIcon } from "./EncryptionIcon";
@@ -20,7 +21,7 @@ import { cl, EncryptionResult, ImageEncryptionData, VideoEncryptionData } from "
 
 export type DecryptOutcome =
     | { state: "plain"; }
-    | { state: "decrypted"; text: string; }
+    | { state: "decrypted"; text: string; stickers?: StickerRef[]; }
     | { state: "no-key"; }
     | { state: "missing-key"; keyId: string; };
 
@@ -42,6 +43,7 @@ export async function decryptForChannel(channelId: string, content: string): Pro
 
     if (r?.kind === "text") return { state: "decrypted", text: r.text };
     if (r?.kind === "file") return { state: "decrypted", text: `📎 ${r.name}` }; // inline over-cap file — Phase B renders the attachment
+    if (r?.kind === "sticker") return { state: "decrypted", text: r.text, stickers: r.stickers };
     if (r?.kind === "keyannounce") return { state: "plain" };                    // handled by the key-announce accessory branch
     // Nothing opened it. Amber only for the unambiguous zero-width stego signal; a bare base64-looking
     // token (JWTs/hashes/IDs exist) is never mislabelled as encrypted.
@@ -65,6 +67,10 @@ export const KeyTransfers = new Map<string, KeyTransfer>(); // messageId -> pars
 // pointing at an object URL so Discord renders the decrypted media natively.
 const NotOurs = new Set<string>(); // attachment ids confirmed to be normal images → never re-probe
 const DecryptedAttachments = new Map<string, { url: string; mime: string; name: string; size: number; width?: number; height?: number; }>(); // attachmentId -> decrypted media
+
+// Decrypted sticker refs keyed by messageId — read at render time by mapStickersForRender (the
+// renderStickersAccessories patch) to inject native sticker objects. Persists across re-renders.
+const DecryptedStickers = new Map<string, StickerRef[]>();
 
 /** The original filename for one of our decrypted-attachment URLs (blob:/data:), for the download click
  *  interceptor in index.tsx. Returns undefined for any URL that isn't one of ours → left to Discord. */
@@ -116,6 +122,18 @@ export function mapAttachmentsForRender(attachments: any[]): any[] {
         return buildSyntheticAttachment(att, dec);
     });
     return changed ? out : attachments;
+}
+
+/** Render-time sticker injection for the renderStickersAccessories patch: append the native sticker
+ *  objects we decrypted for this message so Discord's own renderer draws them (static/APNG/GIF/Lottie).
+ *  Returns the SAME array if we have nothing for this message. */
+export function mapStickersForRender(stickers: any[], message: any): any[] {
+    const refs = DecryptedStickers.get(message?.id);
+    if (!refs?.length) return stickers;
+    return [
+        ...(stickers ?? []),
+        ...refs.map(r => ({ format_type: r.formatType, id: r.id, name: r.name, type: r.type, available: true })),
+    ];
 }
 const ProbingAttachments = new Set<string>(); // attachment ids with an in-flight probe (dedupe)
 // Over-cap-text cover PNGs ({ kind: "text" }): handled once via handleDecryption (which mutates
@@ -519,6 +537,10 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                 .then(outcome => {
                     if (outcome.state === "decrypted") {
                         setReceiveState(null);
+
+                        if (outcome.stickers?.length) {
+                            DecryptedStickers.set(message.id, outcome.stickers);
+                        }
 
                         // Key-transfer payloads decrypt to a JSON control message — never write that
                         // into message.content. Capture it so the key-transfer card renders instead.

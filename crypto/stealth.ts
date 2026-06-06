@@ -1,6 +1,6 @@
 import { deserializeSealed, fingerprintOf, openSealedBytes, sealToBytes, serializeSealed } from "./asymmetric";
 import { packBundle, unpackBundle } from "./codec";
-import { CT_FILE, CT_TEXT, frameSym, packInner, unframeSym, unpackFileBody, unpackInner } from "./envelope";
+import { CT_FILE, CT_STICKER, CT_TEXT, frameSym, packInner, StickerRef, unframeSym, unpackFileBody, unpackInner, unpackStickerBody } from "./envelope";
 import { utf8Decode, utf8Encode } from "./encoding";
 import { decryptSymBytes, encryptSymBytes } from "./symmetric";
 import { PublicBundle } from "./types";
@@ -16,6 +16,7 @@ export interface TrialOpts {
 export type TrialResult =
     | { kind: "text"; text: string }
     | { kind: "file"; mime: string; name: string; data: Uint8Array }
+    | { kind: "sticker"; stickers: StickerRef[]; text: string }
     | { kind: "keyannounce"; bundle: PublicBundle }
     | null;
 
@@ -51,6 +52,10 @@ function interpretInner(contentType: number, body: Uint8Array): TrialResult {
     if (contentType === CT_FILE) {
         const f = unpackFileBody(body);
         return f ? { kind: "file", mime: f.mime, name: f.name, data: f.data } : null;
+    }
+    if (contentType === CT_STICKER) {
+        const s = unpackStickerBody(body);
+        return s ? { kind: "sticker", stickers: s.stickers, text: s.text } : null;
     }
     return null;
 }
