@@ -6,7 +6,7 @@ import { insertTextIntoChatInputBox, sendMessage } from "@utils/discord";
 import { openModal } from "@utils/modal";
 import definePlugin from "@utils/types";
 import { Channel, Message, User } from "@vencord/discord-types";
-import { ChannelRouter, ChannelStore, GuildStore, Menu, SelectedChannelStore, StickersStore, Toasts, UserStore } from "@webpack/common";
+import { ChannelRouter, ChannelStore, GuildStore, Menu, SelectedChannelStore, showToast, StickersStore, UserStore } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
 import { publicBundle, sealTo, serializeSealed } from "./crypto/asymmetric";
@@ -171,16 +171,14 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, props) => {
                             if (outcome.state === "decrypted") {
                                 handleDecryption(message.id, { text: outcome.text, success: true });
                             } else if (outcome.state === "no-key") {
-                                Toasts.show({
-                                    message: "No encryption key set for this context.",
-                                    id: Toasts.genId(),
-                                    type: Toasts.Type.FAILURE
+                                showToast({
+                                    text: "No encryption key set for this context.",
+                                    variant: "critical"
                                 });
                             } else if (outcome.state === "missing-key") {
-                                Toasts.show({
-                                    message: "Encrypted with a key you don't have — ask for the current key.",
-                                    id: Toasts.genId(),
-                                    type: Toasts.Type.MESSAGE
+                                showToast({
+                                    text: "Encrypted with a key you don't have — ask for the current key.",
+                                    variant: "default"
                                 });
                             }
                         }}
@@ -203,18 +201,16 @@ const messageCtxPatch: NavContextMenuPatchCallback = (children, props) => {
                             action={async () => {
                                 const r = await trialDecode(wire.bytes, { symKeys: [] });
                                 if (r?.kind !== "keyannounce") {
-                                    Toasts.show({
-                                        message: "That message isn't a valid key announcement.",
-                                        id: Toasts.genId(),
-                                        type: Toasts.Type.FAILURE
+                                    showToast({
+                                        text: "That message isn't a valid key announcement.",
+                                        variant: "critical"
                                     });
                                     return;
                                 }
                                 await forcePinPeer(keyAuthor, r.bundle);
-                                Toasts.show({
-                                    message: `Saved ${(message.author as any)?.username ?? "their"} encryption key — verify the fingerprint.`,
-                                    id: Toasts.genId(),
-                                    type: Toasts.Type.SUCCESS
+                                showToast({
+                                    text: `Saved ${(message.author as any)?.username ?? "their"} encryption key — verify the fingerprint.`,
+                                    variant: "success"
                                 });
                             }}
                         />
@@ -644,10 +640,9 @@ async function publishKeyIfNeeded(channelId: string): Promise<boolean> {
     const bytes = await buildKeyAnnounceWire(publicBundle(id));
     const rec = getRecord(contextKey(ctx));
     sendMessage(channelId, { content: wrapWire(bytes, { stego: rec.stego, words: getRandomWords(4) }) });
-    Toasts.show({
-        message: "Shared your encryption key — ask them to do the same to start an encrypted chat.",
-        id: Toasts.genId(),
-        type: Toasts.Type.MESSAGE
+    showToast({
+        text: "Shared your encryption key — ask them to do the same to start an encrypted chat.",
+        variant: "default"
     });
     return true;
 }
@@ -659,19 +654,17 @@ async function startEncryptedChat(channelId: string) {
 
     const ctx = getContext(channel, getSelfId());
     if (ctx.type !== "dm") {
-        Toasts.show({
-            message: "Encrypted chat handshake is only available in 1:1 DMs.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "Encrypted chat handshake is only available in 1:1 DMs.",
+            variant: "critical"
         });
         return;
     }
 
     await insertMyKeyIntoChat();
-    Toasts.show({
-        message: "Inserted your encryption key into the message box — review and send it.",
-        id: Toasts.genId(),
-        type: Toasts.Type.SUCCESS
+    showToast({
+        text: "Inserted your encryption key into the message box — review and send it.",
+        variant: "success"
     });
 }
 
@@ -687,10 +680,9 @@ async function sendServerKey(channelId: string, sourceCtx: Context) {
     const peer = getPeer(ctx.id);
     const id = getIdentity();
     if (!peer || !id) {
-        Toasts.show({
-            message: "Set up an encrypted chat with this person first (no pinned key yet).",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "Set up an encrypted chat with this person first (no pinned key yet).",
+            variant: "critical"
         });
         return;
     }
@@ -698,10 +690,9 @@ async function sendServerKey(channelId: string, sourceCtx: Context) {
     const rec = getRecord(contextKey(sourceCtx));
     const current = rec.currentKeyId && rec.keys.find(k => k.keyId === rec.currentKeyId);
     if (!current) {
-        Toasts.show({
-            message: "No key to send for that server.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "No key to send for that server.",
+            variant: "critical"
         });
         return;
     }
@@ -721,10 +712,9 @@ async function sendServerKey(channelId: string, sourceCtx: Context) {
     const wire = wrapWire(utf8Encode(serializeSealed(sealed)), { stego: false, words: getRandomWords(4) });
     ChannelRouter.transitionToChannel(channelId); // open/focus the DM so its message box is the target
     setTimeout(() => insertTextIntoChatInputBox(wire), 100); // let the channel switch settle, then paste
-    Toasts.show({
-        message: `Key for ${guildName} is in the message box — review and send it.`,
-        id: Toasts.genId(),
-        type: Toasts.Type.SUCCESS
+    showToast({
+        text: `Key for ${guildName} is in the message box — review and send it.`,
+        variant: "success"
     });
 }
 
@@ -747,20 +737,18 @@ async function distributeGroupKey(channelId: string) {
 
     const ctx = getContext(channel, getSelfId());
     if (ctx.type !== "groupdm") {
-        Toasts.show({
-            message: "Group key distribution is only available in group DMs.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "Group key distribution is only available in group DMs.",
+            variant: "critical"
         });
         return;
     }
 
     const id = getIdentity();
     if (!id) {
-        Toasts.show({
-            message: "Your encryption identity is not ready yet.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "Your encryption identity is not ready yet.",
+            variant: "critical"
         });
         return;
     }
@@ -768,10 +756,9 @@ async function distributeGroupKey(channelId: string) {
     const rec = getRecord(contextKey(ctx));
     const current = rec.currentKeyId && rec.keys.find(k => k.keyId === rec.currentKeyId);
     if (!current) {
-        Toasts.show({
-            message: "Set a key for this group DM first.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "Set a key for this group DM first.",
+            variant: "critical"
         });
         return;
     }
@@ -780,10 +767,9 @@ async function distributeGroupKey(channelId: string) {
     const recipientIds = (channel.recipients ?? []).filter(r => r !== selfId);
     const recipients = recipientIds.map(r => getPeer(r)).filter((p): p is NonNullable<typeof p> => !!p);
     if (recipients.length === 0) {
-        Toasts.show({
-            message: "No pinned recipients yet — exchange keys with members first.",
-            id: Toasts.genId(),
-            type: Toasts.Type.FAILURE
+        showToast({
+            text: "No pinned recipients yet — exchange keys with members first.",
+            variant: "critical"
         });
         return;
     }
@@ -800,12 +786,11 @@ async function distributeGroupKey(channelId: string) {
     const sealed = await sealTo(text, [publicBundle(id), ...bundles], id.ecdsaPrivateJwk);
     const bytes = utf8Encode(serializeSealed(sealed));
     sendMessage(channelId, { content: wrapWire(bytes, { stego: rec.stego, words: getRandomWords(4) }) });
-    Toasts.show({
-        message: missing > 0
+    showToast({
+        text: missing > 0
             ? `Distributed the group key to ${bundles.length} member(s); ${missing} not yet pinned.`
             : `Distributed the group key to ${bundles.length} member(s).`,
-        id: Toasts.genId(),
-        type: Toasts.Type.SUCCESS
+        variant: "success"
     });
 }
 
@@ -1387,16 +1372,14 @@ export default definePlugin({
                     if (outcome.state === "decrypted") {
                         handleDecryption(message.id, { text: outcome.text, success: true });
                     } else if (outcome.state === "no-key") {
-                        Toasts.show({
-                            message: "No encryption key set for this context.",
-                            id: Toasts.genId(),
-                            type: Toasts.Type.FAILURE
+                        showToast({
+                            text: "No encryption key set for this context.",
+                            variant: "critical"
                         });
                     } else if (outcome.state === "missing-key") {
-                        Toasts.show({
-                            message: "Encrypted with a key you don't have — ask for the current key.",
-                            id: Toasts.genId(),
-                            type: Toasts.Type.MESSAGE
+                        showToast({
+                            text: "Encrypted with a key you don't have — ask for the current key.",
+                            variant: "default"
                         });
                     }
                 }
@@ -1464,10 +1447,9 @@ export default definePlugin({
                     pluginOriginalAddFiles({ channelId, draftType: 0, files: [{ file, platform: 1 }] });
                     // Keep any pings as the visible content; the secret rides inside the PNG.
                     message.content = mentions.length ? mentions.join(" ") : "";
-                    Toasts.show({
-                        message: "Message too long to hide inline — sent as an image.",
-                        id: Toasts.genId(),
-                        type: Toasts.Type.MESSAGE
+                    showToast({
+                        text: "Message too long to hide inline — sent as an image.",
+                        variant: "default"
                     });
                     return;
                 }
