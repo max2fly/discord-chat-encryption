@@ -11,6 +11,8 @@ There is **nothing on the wire that says "this is encrypted."** No `[ENC]`/`[PGP
 
 > ⚠️ **Honest disclaimer.** This is a research project, not an audited secure‑messaging product. It defeats casual reading, keyword/regex scanning, and the "this is obviously encrypted" metadata signal. It does **not** claim to defeat a determined analyst who scans for zero‑width characters or structurally diffs your images, and it does not protect metadata like *who you talk to* or *when*. Don't use it where your safety depends on it. See [Security & threat model](#security--threat-model).
 
+See: https://docs.vencord.dev/installing/custom-plugins/ for installation directions
+
 ---
 
 ## Features
