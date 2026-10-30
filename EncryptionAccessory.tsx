@@ -1,6 +1,7 @@
+import { Button } from "@components/Button";
 import { openModal } from "@utils/modal";
 import { Message } from "@vencord/discord-types";
-import { Alerts, Button, ChannelStore, useEffect, useReducer, useState } from "@webpack/common";
+import { Alerts, ChannelStore, useEffect, useReducer, useState } from "@webpack/common";
 import { FluxDispatcher } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 
@@ -620,7 +621,7 @@ export function EncryptionAccessory({ message }: { message: Message; }) {
                         </div>
                     )}
                     <Button
-                        size={Button.Sizes.SMALL}
+                        size="small"
                         onClick={() => openModal(p => (
                             <GuildKeyPicker
                                 rootProps={p}

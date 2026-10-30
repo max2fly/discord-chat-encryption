@@ -1,11 +1,16 @@
+import { Button } from "@components/Button";
+import { FormSwitch } from "@components/FormSwitch";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { Margins } from "@utils/margins";
 import { ModalContent, ModalFooter, ModalHeader, ModalRoot, ModalSize } from "@utils/modal";
 import { RenderModalProps } from "@vencord/discord-types";
-import { Alerts, Button, Forms, Switch, TextInput, useState } from "@webpack/common";
+import { Alerts, TextInput, useState } from "@webpack/common";
 
 import { contextKey } from "./crypto/context";
 import { Context } from "./crypto/types";
 import { clearKeys, getRecord, setPassword, setStego } from "./store";
+import { cl } from "./utils";
 import { ensureVaultUnlocked } from "./vaultGate";
 
 export function KeyEntryModal({ rootProps, context }: { rootProps: RenderModalProps; context: Context; }) {
@@ -29,20 +34,20 @@ export function KeyEntryModal({ rootProps, context }: { rootProps: RenderModalPr
     return (
         <ModalRoot {...rootProps} size={ModalSize.SMALL}>
             <ModalHeader>
-                <Forms.FormTitle tag="h2">
+                <Heading tag="h2">
                     {isRotation ? "Rotate encryption key" : "Set encryption key"} — {context.type}
-                </Forms.FormTitle>
+                </Heading>
             </ModalHeader>
             <ModalContent>
-                <Forms.FormText className={Margins.bottom8}>
+                <Paragraph className={Margins.bottom8}>
                     Everyone using the same password for this {context.type} can read each other's messages.
                     Use a strong passphrase — the salt is public.
-                </Forms.FormText>
+                </Paragraph>
                 {isRotation && (
-                    <Forms.FormText className={Margins.bottom8} style={{ color: "var(--text-warning)" }}>
+                    <Paragraph className={Margins.bottom8} style={{ color: "var(--text-warning)" }}>
                         ⚠ This rotates the key. Your current key is kept in history so old messages still decrypt;
                         new messages use the new key until others receive it.
-                    </Forms.FormText>
+                    </Paragraph>
                 )}
                 <TextInput
                     type="password"
@@ -51,16 +56,15 @@ export function KeyEntryModal({ rootProps, context }: { rootProps: RenderModalPr
                     onChange={setPwd}
                     autoFocus
                 />
-                <Switch
+                <FormSwitch
                     className={Margins.top16}
                     value={stego}
                     onChange={v => { setStegoLocal(v); setStego(context, v); }}
-                >
-                    Hide messages as innocent text (steganography)
-                </Switch>
-                <Forms.FormText className={Margins.top8}>
+                    title="Hide messages as innocent text (steganography)"
+                />
+                <Paragraph className={Margins.top8}>
                     Keys in history: {record.keys.length}
-                </Forms.FormText>
+                </Paragraph>
             </ModalContent>
             <ModalFooter>
                 <Button disabled={!password || busy} onClick={save}>
@@ -68,8 +72,7 @@ export function KeyEntryModal({ rootProps, context }: { rootProps: RenderModalPr
                 </Button>
                 {record.keys.length > 0 && (
                     <Button
-                        color={Button.Colors.RED}
-                        look={Button.Looks.LINK}
+                        variant="dangerSecondary"
                         onClick={() => Alerts.show({
                             title: "Delete saved keys?",
                             body: <>
@@ -78,7 +81,7 @@ export function KeyEntryModal({ rootProps, context }: { rootProps: RenderModalPr
                             </>,
                             confirmText: "Delete keys",
                             cancelText: "Cancel",
-                            confirmColor: Button.Colors.RED,
+                            confirmColor: cl("danger-btn"),
                             onConfirm: async () => { await clearKeys(context); rootProps.onClose(); },
                         })}
                     >

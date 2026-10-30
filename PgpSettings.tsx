@@ -1,7 +1,13 @@
+import { Button } from "@components/Button";
+import { Divider } from "@components/Divider";
+import { FormSwitch } from "@components/FormSwitch";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { Margins } from "@utils/margins";
-import { Alerts, Button, Forms, Switch, useEffect, useReducer } from "@webpack/common";
+import { Alerts, useEffect, useReducer } from "@webpack/common";
 
 import { forgetPeer, getIdentity, getPeers, regenerateIdentity, setPeerVerified, subscribe } from "./store";
+import { cl } from "./utils";
 
 // re-render this component whenever the store changes
 function useStoreTick() {
@@ -16,7 +22,7 @@ function confirmRegenerate() {
             + "fingerprint will see a key-change warning and must re-verify you. This cannot be undone.",
         confirmText: "Regenerate",
         cancelText: "Cancel",
-        confirmColor: Button.Colors.RED,
+        confirmColor: cl("danger-btn"),
         onConfirm: () => {
             regenerateIdentity().catch(error => {
                 console.error("ChatEncryption: Failed to regenerate identity:", error);
@@ -32,7 +38,7 @@ function confirmForget(userId: string) {
             + "fresh (trust-on-first-use). Do this only if you've verified their key legitimately changed.",
         confirmText: "Forget",
         cancelText: "Cancel",
-        confirmColor: Button.Colors.RED,
+        confirmColor: cl("danger-btn"),
         onConfirm: () => {
             forgetPeer(userId).catch(error => {
                 console.error("ChatEncryption: Failed to forget peer:", error);
@@ -48,32 +54,30 @@ export function PgpSettings() {
     const peers = getPeers();
 
     return (
-        <Forms.FormSection>
-            <Forms.FormTitle tag="h3">Your identity</Forms.FormTitle>
-            <Forms.FormText className={Margins.bottom8}>
+        <section>
+            <Heading tag="h3">Your identity</Heading>
+            <Paragraph className={Margins.bottom8}>
                 Fingerprint: <code>{identity?.fingerprint ?? "no identity yet"}</code>
-            </Forms.FormText>
+            </Paragraph>
 
-            <Forms.FormDivider className={Margins.bottom16} />
+            <Divider className={Margins.bottom16} />
 
-            <Forms.FormTitle tag="h3">Pinned peers</Forms.FormTitle>
+            <Heading tag="h3">Pinned peers</Heading>
             {peers.length === 0 ? (
-                <Forms.FormText className={Margins.bottom8}>No peers pinned yet.</Forms.FormText>
+                <Paragraph className={Margins.bottom8}>No peers pinned yet.</Paragraph>
             ) : (
                 peers.map(peer => (
                     <div key={peer.userId} className={Margins.bottom8}>
-                        <Switch
+                        <FormSwitch
                             value={peer.verified}
                             onChange={v => { setPeerVerified(peer.userId, v); }}
-                            note={peer.bundle.fingerprint}
+                            description={peer.bundle.fingerprint}
                             hideBorder
-                        >
-                            {peer.userId}
-                        </Switch>
+                            title={peer.userId}
+                        />
                         <Button
-                            size={Button.Sizes.SMALL}
-                            color={Button.Colors.RED}
-                            look={Button.Looks.LINK}
+                            size="small"
+                            variant="dangerSecondary"
                             onClick={() => confirmForget(peer.userId)}
                         >
                             Forget key
@@ -82,15 +86,15 @@ export function PgpSettings() {
                 ))
             )}
 
-            <Forms.FormDivider className={Margins.bottom16} />
+            <Divider className={Margins.bottom16} />
 
-            <Forms.FormTitle tag="h3">Danger zone</Forms.FormTitle>
-            <Forms.FormText className={Margins.bottom8}>
+            <Heading tag="h3">Danger zone</Heading>
+            <Paragraph className={Margins.bottom8}>
                 Regenerating your identity breaks every existing pinned relationship.
-            </Forms.FormText>
-            <Button color={Button.Colors.RED} onClick={confirmRegenerate}>
+            </Paragraph>
+            <Button variant="dangerPrimary" onClick={confirmRegenerate}>
                 Regenerate identity
             </Button>
-        </Forms.FormSection>
+        </section>
     );
 }

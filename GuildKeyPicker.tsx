@@ -1,6 +1,8 @@
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { ModalContent, ModalHeader, ModalRoot, ModalSize } from "@utils/modal";
 import { RenderModalProps } from "@vencord/discord-types";
-import { Alerts, Forms, GuildStore, IconUtils, useMemo } from "@webpack/common";
+import { Alerts, GuildStore, IconUtils, useMemo } from "@webpack/common";
 
 import { contextKey, getContext } from "./crypto/context";
 import { Context } from "./crypto/types";
@@ -59,13 +61,13 @@ export function GuildKeyPicker({ rootProps, mode, presetGuildId, presetContext, 
     return (
         <ModalRoot {...rootProps} size={ModalSize.MEDIUM}>
             <ModalHeader>
-                <Forms.FormTitle tag="h2">
+                <Heading tag="h2">
                     {mode === "save" ? "Save key to server" : "Send which server's key?"}
-                </Forms.FormTitle>
+                </Heading>
             </ModalHeader>
             <ModalContent>
                 {mode === "send" && guilds.length === 0 && (
-                    <Forms.FormText>You have no servers with a key to share yet. Set a key on a server first.</Forms.FormText>
+                    <Paragraph>You have no servers with a key to share yet. Set a key on a server first.</Paragraph>
                 )}
                 <div className={cl("guild-grid")}>
                     {presetContext && presetContext.type === "groupdm" && (

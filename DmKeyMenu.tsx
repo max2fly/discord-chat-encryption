@@ -1,12 +1,17 @@
+import { Button } from "@components/Button";
+import { FormSwitch } from "@components/FormSwitch";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { Margins } from "@utils/margins";
 import { ModalContent, ModalHeader, ModalRoot, ModalSize } from "@utils/modal";
 import { RenderModalProps } from "@vencord/discord-types";
-import { Alerts, Button, Forms, Switch, useEffect, useReducer } from "@webpack/common";
+import { Alerts, useEffect, useReducer } from "@webpack/common";
 
 import { contextKey } from "./crypto/context";
 import { Context } from "./crypto/types";
 import { insertMyKeyIntoChat } from "./dmActions";
 import { forgetPeer, getChannelAutoEncrypt, getIdentity, getPeer, getRecord, setChannelAutoEncrypt, setStego, subscribe } from "./store";
+import { cl } from "./utils";
 
 /** Left-click menu for the chat-bar lock in a 1:1 DM: share key (to message box), forget peer key, toggle auto-encrypt. */
 export function DmKeyMenu({ rootProps, peerId, channelId }: { rootProps: RenderModalProps; peerId: string; channelId: string; }) {
@@ -29,7 +34,7 @@ export function DmKeyMenu({ rootProps, peerId, channelId }: { rootProps: RenderM
             + "(trust-on-first-use). Do this only if you've verified their key legitimately changed.",
         confirmText: "Forget",
         cancelText: "Cancel",
-        confirmColor: Button.Colors.RED,
+        confirmColor: cl("danger-btn"),
         onConfirm: () => {
             forgetPeer(peerId).catch(e => console.error("ChatEncryption: forgetPeer failed:", e));
             rootProps.onClose();
@@ -38,37 +43,35 @@ export function DmKeyMenu({ rootProps, peerId, channelId }: { rootProps: RenderM
 
     return (
         <ModalRoot {...rootProps} size={ModalSize.SMALL}>
-            <ModalHeader><Forms.FormTitle tag="h2">Encrypted DM</Forms.FormTitle></ModalHeader>
+            <ModalHeader><Heading tag="h2">Encrypted DM</Heading></ModalHeader>
             <ModalContent>
-                <Forms.FormText className={Margins.bottom8}>
+                <Paragraph className={Margins.bottom8}>
                     Your key: <code>{myFingerprint ?? "no identity yet"}</code>
-                </Forms.FormText>
-                <Forms.FormText className={Margins.bottom16}>
+                </Paragraph>
+                <Paragraph className={Margins.bottom16}>
                     {peer
                         ? <>Their saved key: <code>{peer.bundle.fingerprint}</code></>
                         : "You haven't recorded their key yet. Share yours below, and have them share theirs."}
-                </Forms.FormText>
+                </Paragraph>
 
-                <Switch
+                <FormSwitch
                     value={getChannelAutoEncrypt(channelId)}
                     onChange={v => setChannelAutoEncrypt(channelId, v)}
                     hideBorder
-                >
-                    Auto-encrypt messages in this DM
-                </Switch>
-                <Switch
+                    title="Auto-encrypt messages in this DM"
+                />
+                <FormSwitch
                     value={stego}
                     onChange={v => setStego(dmCtx, v)}
                     hideBorder
-                >
-                    Hide messages as innocent text (steganography)
-                </Switch>
+                    title="Hide messages as innocent text (steganography)"
+                />
 
                 <Button className={Margins.top8} onClick={insertKey}>
                     Insert my key into the message box
                 </Button>
                 {peer && (
-                    <Button className={Margins.top8} color={Button.Colors.RED} look={Button.Looks.LINK} onClick={forget}>
+                    <Button className={Margins.top8} variant="dangerSecondary" onClick={forget}>
                         Forget their key
                     </Button>
                 )}

@@ -455,3 +455,21 @@
 .vc-encryption-keytransfer-card .vc-encryption-trusted {
     color: var(--text-positive);
 }
+
+/* Red confirm button for Alerts.show/confirm dialogs (passed as `confirmColor`).
+   Mirrors Vencord's own `.vc-btn-dangerPrimary` so it tracks Discord's theme. */
+.vc-encryption-danger-btn {
+    background-color: var(--control-critical-primary-background-default);
+    border-color: var(--control-critical-primary-border-default);
+    color: var(--control-critical-primary-text-default);
+}
+
+.vc-encryption-danger-btn:hover {
+    background-color: var(--control-critical-primary-background-hover);
+    border-color: var(--control-critical-primary-border-hover);
+    color: var(--control-critical-primary-text-hover);
+}
+
+.vc-encryption-danger-btn:active {
+    background-color: var(--control-critical-primary-background-active, var(--control-critical-primary-background-hover));
+}
